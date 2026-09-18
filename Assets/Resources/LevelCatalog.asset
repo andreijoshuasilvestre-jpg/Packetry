@@ -1,0 +1,79 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 13cb08e2f33c5ef4c9ee4ae9719e5226, type: 3}
+  m_Name: LevelCatalog
+  m_EditorClassIdentifier: Assembly-CSharp::LevelCatalog
+  levels:
+  - number: 1
+    title: Device Connecting
+    sceneName: SampleScene
+    category: Tutorials
+    description: 'Learn the basics: place a table, add two PCs and a Switch, then
+      cable everything together into your first working network.'
+    icons:
+    - PC_Icon
+    - Cable
+  - number: 2
+    title: IP Allocation
+    sceneName: SampleScene
+    category: Tutorials
+    description: "Give two PCs IP addresses on the same subnet and get them talking
+      \u2014 your first taste of addressing a network."
+    icons:
+    - PC_Icon
+  - number: 3
+    title: Router CLI Basics
+    sceneName: SampleScene
+    category: Tutorials
+    description: "Open a Router's command line and learn to navigate its modes \u2014
+      User EXEC, Privileged EXEC, Global Config, and Interface Config \u2014 the
+      same way real Cisco IOS works."
+    icons:
+    - Router_Icon
+  - number: 4
+    title: Routers & Subnetting
+    sceneName: SampleScene
+    category: Tutorials
+    description: 'Bridge two different subnets with a Router: address both PCs, configure
+      each router interface, and get a cross-subnet ping working.'
+    icons:
+    - Router_Icon
+    - PC_Icon
+  - number: 5
+    title: LAN Challenge
+    sceneName: SampleScene
+    category: Challenges
+    description: "No hand-holding this time. Build a small LAN \u2014 two PCs and
+      a Switch \u2014 entirely on your own and prove it works with a successful ping."
+    icons:
+    - PC_Icon
+    - Switch_Icon
+  - number: 6
+    title: Two-LAN Challenge
+    sceneName: SampleScene
+    category: Challenges
+    description: 'Scale it up: two switched departments bridged by a Router. Cable,
+      address, and configure everything yourself to get a cross-router ping working.'
+    icons:
+    - PC_Icon
+    - Switch_Icon
+    - Router_Icon
+  - number: 7
+    title: Network Troubleshooting
+    sceneName: SampleScene
+    category: Challenges
+    description: "A pre-built network is broken \u2014 an unplugged cable, a misaddressed
+      PC, and a shut-down router interface. Find and fix all three faults using the
+      tools you've already learned."
+    icons:
+    - Router_Icon
+    - Ping

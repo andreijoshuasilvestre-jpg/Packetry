@@ -1,0 +1,48 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!28 &2800000
+Texture2D:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: RouterChassisNoise
+  m_ImageContentsHash:
+    serializedVersion: 2
+    Hash: 00000000000000000000000000000000
+  m_IsAlphaChannelOptional: 0
+  serializedVersion: 4
+  m_Width: 16
+  m_Height: 16
+  m_CompleteImageSize: 1024
+  m_MipsStripped: 0
+  m_TextureFormat: 4
+  m_MipCount: 1
+  m_IsReadable: 1
+  m_IsPreProcessed: 0
+  m_IgnoreMipmapLimit: 1
+  m_MipmapLimitGroupName: 
+  m_StreamingMipmaps: 0
+  m_StreamingMipmapsPriority: 0
+  m_VTOnly: 0
+  m_AlphaIsTransparency: 0
+  m_ImageCount: 1
+  m_TextureDimension: 2
+  m_TextureSettings:
+    serializedVersion: 2
+    m_FilterMode: 0
+    m_Aniso: 1
+    m_MipBias: 0
+    m_WrapU: 0
+    m_WrapV: 0
+    m_WrapW: 0
+  m_LightmapFormat: 0
+  m_ColorSpace: 1
+  m_PlatformBlob: 
+  image data: 1024
+  _typelessdata: 191919ff161616ff2a2a2aff030303ff1c1c1cff181818ff0d0d0dff2e2e2eff121212ff202020ff272727ff0e0e0eff0e0e0eff1d1d1dff141414ff202020ff282828ff0d0d0dff2a2a2aff0e0e0eff2e2e2eff2e2e2eff040404ff1b1b1bff101010ff262626ff1d1d1dff282828ff2f2f2fff101010ff222222ff030303ff242424ff1c1c1cff070707ff2a2a2aff0b0b0bff0b0b0bff050505ff161616ff131313ff1f1f1fff2c2c2cff171717ff090909ff252525ff060606ff0b0b0bff202020ff090909ff191919ff292929ff070707ff030303ff212121ff1c1c1cff151515ff121212ff242424ff272727ff2c2c2cff151515ff303030ff040404ff2f2f2fff262626ff1a1a1aff222222ff191919ff1b1b1bff171717ff1f1f1fff0b0b0bff161616ff2c2c2cff111111ff040404ff1d1d1dff151515ff1c1c1cff222222ff151515ff0a0a0aff282828ff272727ff292929ff2c2c2cff242424ff2c2c2cff1b1b1bff171717ff2a2a2aff181818ff0f0f0fff1b1b1bff2e2e2eff202020ff2a2a2aff191919ff131313ff0e0e0eff151515ff232323ff080808ff222222ff2b2b2bff212121ff222222ff080808ff121212ff1b1b1bff282828ff2d2d2dff0a0a0aff070707ff191919ff0e0e0eff0a0a0aff0d0d0dff080808ff2b2b2bff262626ff272727ff2e2e2eff060606ff1d1d1dff090909ff2c2c2cff2b2b2bff2f2f2fff222222ff0a0a0aff070707ff050505ff111111ff101010ff232323ff040404ff090909ff2d2d2dff0b0b0bff0d0d0dff1f1f1fff1c1c1cff030303ff202020ff2e2e2eff101010ff0a0a0aff050505ff222222ff181818ff1f1f1fff141414ff181818ff181818ff1f1f1fff252525ff050505ff080808ff242424ff252525ff272727ff090909ff202020ff131313ff242424ff2b2b2bff2a2a2aff282828ff272727ff0d0d0dff040404ff111111ff2d2d2dff212121ff0a0a0aff0d0d0dff2e2e2eff161616ff202020ff292929ff242424ff292929ff0f0f0fff0d0d0dff1b1b1bff232323ff1d1d1dff292929ff212121ff2f2f2fff2f2f2fff030303ff0b0b0bff171717ff161616ff181818ff2c2c2cff202020ff2c2c2cff060606ff171717ff131313ff0e0e0eff181818ff171717ff111111ff181818ff282828ff101010ff141414ff272727ff1f1f1fff181818ff2c2c2cff040404ff2f2f2fff2b2b2bff161616ff282828ff030303ff101010ff040404ff0a0a0aff292929ff0e0e0eff030303ff080808ff191919ff0e0e0eff232323ff111111ff101010ff1a1a1aff1d1d1dff151515ff141414ff1e1e1eff272727ff262626ff0d0d0dff0e0e0eff262626ff1c1c1cff101010ff0a0a0aff131313ff1c1c1cff101010ff151515ff171717ff1d1d1dff191919ff282828ff2c2c2cff
+  m_StreamData:
+    serializedVersion: 2
+    offset: 0
+    size: 0
+    path: 
