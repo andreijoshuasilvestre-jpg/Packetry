@@ -183,18 +183,19 @@ public class Level4Guide : MonoBehaviour
 
     // Nothing else on the sidebar is ever needed for this level's objectives
     // — the starting table/PCs/Switch are already placed and cabled by the
-    // Level4_Template scene, so Table/PC/Switch/Cable have nothing left to
-    // do, and Send Packet/Remove Cable/Remove Device aren't part of any
-    // objective. Mirrors TutorialManager.HideUnneededButtons.
+    // Level4_Template scene, so Table has nothing left to do, and Send
+    // Packet/Remove Cable/Remove Device aren't part of any objective.
+    // Router is the only tool this level ever needs from the devices/cable
+    // compound button (see NetworkUIManager.BuildDevicesCableCompound) —
+    // that button stays visible the whole level, gated by SetCompoundToolLock
+    // in EnterStage below, instead of being hidden like the rest.
+    // Mirrors TutorialManager.HideUnneededButtons.
     void HideUnneededButtons()
     {
         var ui = NetworkUIManager.Instance;
         if (ui == null) return;
 
-        SidebarButtonLock.SetActive(ui.GetDeviceButton(DeviceType.PC), false);
-        SidebarButtonLock.SetActive(ui.GetDeviceButton(DeviceType.Switch), false);
         SidebarButtonLock.SetActive(ui.TableButton, false);
-        SidebarButtonLock.SetActive(ui.CableButton, false);
         SidebarButtonLock.SetActive(ui.SendPacketButton, false);
         SidebarButtonLock.SetActive(ui.RemoveCableButton, false);
         SidebarButtonLock.SetActive(ui.RemoveDeviceButton, false);
@@ -210,7 +211,7 @@ public class Level4Guide : MonoBehaviour
         var ui = NetworkUIManager.Instance;
         if (ui != null)
         {
-            SidebarButtonLock.SetLocked(ui.GetDeviceButton(DeviceType.Router), stage == null || !stage.UnlockRouter);
+            ui.SetCompoundToolLock(stage != null && stage.UnlockRouter ? CompoundToolKind.Router : (CompoundToolKind?)null);
             SidebarButtonLock.SetLocked(ui.PingButton, stage == null || !stage.UnlockPing);
         }
 

@@ -1,7 +1,13 @@
+using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.SceneManagement;
 using TMPro;
+
+/// <summary>The four tools folded into NetworkUIManager's single devices/cable
+/// sidebar button — see BuildDevicesCableCompound.</summary>
+public enum CompoundToolKind { PC, Switch, Router, Cable }
 
 /// <summary>
 /// Builds the game HUD:
@@ -16,8 +22,6 @@ public class NetworkUIManager : MonoBehaviour
     public static NetworkUIManager Instance { get; private set; }
 
     private TextMeshProUGUI statusLabel;
-    private Button cableBtn;
-    private SidebarIconButtonFX cableFx;
     private Button removeCableBtn;
     private SidebarIconButtonFX removeCableFx;
     private Button removeDeviceBtn;
@@ -28,7 +32,31 @@ public class NetworkUIManager : MonoBehaviour
     private SidebarIconButtonFX pingFx;
     private Button sendPacketBtn;
     private SidebarIconButtonFX sendPacketFx;
-    private readonly System.Collections.Generic.Dictionary<DeviceType, SidebarIconButtonFX> deviceFx = new();
+
+    // ── Devices + Cable compound button state (see BuildDevicesCableCompound) ──
+    private RectTransform hudCanvasRect;
+    private readonly Dictionary<CompoundToolKind, (Button btn, SidebarIconButtonFX fx, RectTransform rt)> compoundTools = new();
+    private static readonly CompoundToolKind[] CompoundToolOrder =
+        { CompoundToolKind.PC, CompoundToolKind.Switch, CompoundToolKind.Router, CompoundToolKind.Cable };
+    private Transform compoundListParent; // sidebar Content — where the current face button lives
+    private Transform compoundPoolParent; // inactive holding area for the other three
+    private CompoundToolKind compoundFace = CompoundToolKind.PC;
+    // True from the first SetCompoundToolLock call onward (forced-tool OR fully-locked
+    // alike) — a tutorial/guide step is managing this button, so its flyout stays
+    // disabled regardless of Button.interactable (which SidebarButtonLock's dimming
+    // relies on, but which does NOT stop a separate IPointerClickHandler like
+    // RightClickHandler from still firing on the same GameObject).
+    private bool compoundGuided;
+    private Button devicesCableBtn;
+    private SidebarIconButtonFX devicesCableFx;
+    private RectTransform flyoutRowRt;
+    private GameObject flyoutBackdropGo;
+    private Coroutine flyoutAnimRoutine;
+    private bool FlyoutOpen => flyoutRowRt != null;
+
+    const float FlyoutGap          = 10f;   // gap between the sidebar's right edge and the first flyout button
+    const float FlyoutItemDuration = 0.22f; // each flyout button's own scale-in
+    const float FlyoutStagger      = 0.07f; // delay before the next button starts, for the "trail" effect
 
     private static readonly Color SidebarBg = new Color(0.06f, 0.08f, 0.13f, 0.95f);
 
@@ -52,7 +80,7 @@ public class NetworkUIManager : MonoBehaviour
     private static readonly Color IconSettings = new Color(0.75f, 0.78f, 0.85f, 1f);
     private static readonly Color IconExit     = new Color(0.90f, 0.30f, 0.30f, 1f);
 
-    private enum ButtonKind { Device, Cable, RemoveCable, RemoveDevice, Table, Ping, SendPacket }
+    private enum ButtonKind { RemoveCable, RemoveDevice, Table, Ping, SendPacket }
 
     void Awake()
     {
@@ -67,10 +95,15 @@ public class NetworkUIManager : MonoBehaviour
 
     // ── Public accessors (TutorialManager/Level2Guide/Level3Guide: gray out disallowed buttons, anchor highlights) ──
 
-    public Button GetDeviceButton(DeviceType t) => deviceFx.TryGetValue(t, out var fx) ? fx.GetComponent<Button>() : null;
-    public RectTransform GetDeviceButtonRect(DeviceType t) => deviceFx.TryGetValue(t, out var fx) ? fx.transform as RectTransform : null;
-    public Button CableButton => cableBtn;
-    public RectTransform CableButtonRect => cableBtn != null ? cableBtn.transform as RectTransform : null;
+    // PC/Switch/Router/Cable now all live on the same compound button (see
+    // BuildDevicesCableCompound) — every one of these accessors resolves to
+    // it regardless of which DeviceType is asked for, which is what lets
+    // TutorialManager/Level4Guide's existing per-device Highlight targeting
+    // keep working unchanged.
+    public Button GetDeviceButton(DeviceType t) => devicesCableBtn;
+    public RectTransform GetDeviceButtonRect(DeviceType t) => devicesCableBtn != null ? devicesCableBtn.transform as RectTransform : null;
+    public Button CableButton => devicesCableBtn;
+    public RectTransform CableButtonRect => devicesCableBtn != null ? devicesCableBtn.transform as RectTransform : null;
     public Button TableButton => tableBtn;
     public RectTransform TableButtonRect => tableBtn != null ? tableBtn.transform as RectTransform : null;
     public Button PingButton => pingBtn;
@@ -93,6 +126,7 @@ public class NetworkUIManager : MonoBehaviour
         UIScale.Register(scaler);
 
         canvasGo.AddComponent<GraphicRaycaster>();
+        hudCanvasRect = canvasGo.GetComponent<RectTransform>();
 
         BuildSidebar(canvasGo.transform);
         BuildStatusBar(canvasGo.transform);
@@ -232,11 +266,7 @@ public class NetworkUIManager : MonoBehaviour
         // "_Clicked" variant is the same artwork with its box lit up, reused as the hover state.
         var entries = new (string label, Color glow, ButtonKind kind, string iconSprite, string hoverSprite)[]
         {
-            ("PC",     IconPC,     ButtonKind.Device, "PC_Icon",     "PC_Icon_Clicked"),
-            ("Switch", IconSwitch, ButtonKind.Device, "Switch_Icon", "Switch_Icon_Clicked"),
-            ("Router", IconRouter, ButtonKind.Device, "Router_Icon", "Router_Icon_Clicked"),
             ("Table",  IconTable,  ButtonKind.Table,  "Table",       "Table_Icon_Clicked"),
-            ("Cable",  IconCable,  ButtonKind.Cable,  "Cable",       "Cable_Icon_Clicked"),
             ("Ping",   IconPing,   ButtonKind.Ping,   "Ping",        "Ping_Icon_Clicked"),
             ("Send Packet", IconSendPacket, ButtonKind.SendPacket, "SendPackets",     "SendPacket_Icon_Clicked"),
             ("Remove Cable",  IconRemove,       ButtonKind.RemoveCable,  "RemoveCable_Icon",  "RemoveCable_Icon_Clicked"),
@@ -245,16 +275,14 @@ public class NetworkUIManager : MonoBehaviour
 
         float buttonWidth = SidebarButtonWidth * SidebarButtonScale;
 
+        BuildDevicesCableCompound(contentGo.transform, buttonWidth);
+
         foreach (var (label, glow, kind, iconSprite, hoverSprite) in entries)
         {
             var (btn, fx) = CreateSidebarButton(contentGo.transform, label, glow, buttonWidth, iconSprite, hoverSprite);
 
             switch (kind)
             {
-                case ButtonKind.Cable:
-                    cableBtn = btn; cableFx = fx;
-                    btn.onClick.AddListener(OnCableClicked);
-                    break;
                 case ButtonKind.RemoveCable:
                     removeCableBtn = btn; removeCableFx = fx;
                     btn.onClick.AddListener(OnRemoveCableClicked);
@@ -275,13 +303,253 @@ public class NetworkUIManager : MonoBehaviour
                     sendPacketBtn = btn; sendPacketFx = fx;
                     btn.onClick.AddListener(OnSendPacketClicked);
                     break;
-                default:
-                    DeviceType dt = System.Enum.Parse<DeviceType>(label);
-                    deviceFx[dt] = fx;
-                    btn.onClick.AddListener(() => DragDropManager.Instance?.StartDragging(dt));
-                    break;
             }
         }
+    }
+
+    // ── Devices + Cable compound button ─────────────────────────────────────
+    // Folds what used to be four separate sidebar entries (PC/Switch/Router/
+    // Cable) into one: a single button showing whichever tool is currently
+    // "the face" (PC by default) — left-click uses it immediately, same as
+    // before. Right-click reveals the other three as a horizontal flyout that
+    // flares out past the sidebar's right edge into the play area; clicking
+    // one swaps it in as the new face and closes the flyout.
+    //
+    // All four tool buttons are built once, up front, via the same
+    // CreateSidebarButton used everywhere else in this file (identical art/
+    // FX/fallback handling) — only ONE of them is ever parented into the
+    // sidebar's Content list at a time (the current face); the other three
+    // sit inactive in compoundPoolParent until the flyout borrows them.
+    // TutorialManager/Level4Guide drive SetCompoundToolLock to force a single
+    // tool (and disable the flyout) during a guided step — see that method.
+
+    void BuildDevicesCableCompound(Transform listParent, float buttonWidth)
+    {
+        compoundListParent = listParent;
+
+        var poolGo = new GameObject("CompoundToolPool", typeof(RectTransform));
+        poolGo.transform.SetParent(transform, false);
+        poolGo.SetActive(false);
+        compoundPoolParent = poolGo.transform;
+
+        var art = new (CompoundToolKind kind, string label, Color glow, string iconSprite, string hoverSprite)[]
+        {
+            (CompoundToolKind.PC,     "PC",     IconPC,     "PC_Icon",     "PC_Icon_Clicked"),
+            (CompoundToolKind.Switch, "Switch", IconSwitch, "Switch_Icon", "Switch_Icon_Clicked"),
+            (CompoundToolKind.Router, "Router", IconRouter, "Router_Icon", "Router_Icon_Clicked"),
+            (CompoundToolKind.Cable,  "Cable",  IconCable,  "Cable",       "Cable_Icon_Clicked"),
+        };
+
+        foreach (var (kind, label, glow, iconSprite, hoverSprite) in art)
+        {
+            var (btn, fx) = CreateSidebarButton(listParent, label, glow, buttonWidth, iconSprite, hoverSprite);
+
+            if (kind == CompoundToolKind.Cable)
+                btn.onClick.AddListener(OnCableClicked);
+            else
+            {
+                DeviceType dt = kind == CompoundToolKind.PC ? DeviceType.PC
+                              : kind == CompoundToolKind.Switch ? DeviceType.Switch
+                              : DeviceType.Router;
+                btn.onClick.AddListener(() => DragDropManager.Instance?.StartDragging(dt));
+            }
+
+            // Fires after the tool's own action above: makes this the new
+            // face (or, if it's already the face — the normal non-flyout
+            // click path — just closes the flyout if one was somehow open).
+            CompoundToolKind capturedKind = kind;
+            btn.onClick.AddListener(() => SelectCompoundFace(capturedKind));
+
+            var relay = btn.gameObject.AddComponent<RightClickHandler>();
+            relay.onRightClick = ToggleFlyout;
+
+            compoundTools[kind] = (btn, fx, btn.transform as RectTransform);
+        }
+
+        devicesCableBtn = compoundTools[compoundFace].btn;
+        devicesCableFx  = compoundTools[compoundFace].fx;
+
+        foreach (var kind in CompoundToolOrder)
+        {
+            if (kind == compoundFace) continue;
+            var entry = compoundTools[kind];
+            entry.rt.SetParent(compoundPoolParent, false);
+            entry.btn.gameObject.SetActive(false);
+        }
+        devicesCableBtn.transform.SetSiblingIndex(0);
+    }
+
+    void SelectCompoundFace(CompoundToolKind kind)
+    {
+        if (kind == compoundFace) { CloseFlyout(); return; }
+
+        var oldEntry = compoundTools[compoundFace];
+        oldEntry.rt.SetParent(compoundPoolParent, false);
+        oldEntry.btn.gameObject.SetActive(false);
+
+        compoundFace = kind;
+        var newEntry = compoundTools[kind];
+        newEntry.rt.SetParent(compoundListParent, false);
+        newEntry.rt.SetSiblingIndex(0);
+        newEntry.btn.gameObject.SetActive(true);
+
+        devicesCableBtn = newEntry.btn;
+        devicesCableFx  = newEntry.fx;
+
+        CloseFlyout();
+    }
+
+    void ToggleFlyout()
+    {
+        if (compoundGuided) return; // a tutorial/guide step is managing this button — see SetCompoundToolLock
+        if (FlyoutOpen) CloseFlyout();
+        else OpenFlyout();
+    }
+
+    void OpenFlyout()
+    {
+        // Full-screen invisible catch-all — a click anywhere outside the
+        // flyout's own buttons closes it, same as any other dropdown/flyout
+        // (this also naturally covers "click the face button again" and
+        // "click elsewhere in the game", both of which should just close it).
+        flyoutBackdropGo = new GameObject("FlyoutBackdrop", typeof(RectTransform));
+        flyoutBackdropGo.transform.SetParent(hudCanvasRect, false);
+        var backdropImg = flyoutBackdropGo.AddComponent<Image>();
+        backdropImg.color = new Color(0f, 0f, 0f, 0f);
+        var bdRt = flyoutBackdropGo.GetComponent<RectTransform>();
+        bdRt.anchorMin = Vector2.zero;
+        bdRt.anchorMax = Vector2.one;
+        bdRt.offsetMin = Vector2.zero;
+        bdRt.offsetMax = Vector2.zero;
+        var backdropBtn = flyoutBackdropGo.AddComponent<Button>();
+        backdropBtn.transition    = Selectable.Transition.None;
+        backdropBtn.targetGraphic = backdropImg;
+        backdropBtn.onClick.AddListener(CloseFlyout);
+
+        var rowGo = new GameObject("DevicesFlyout", typeof(RectTransform));
+        rowGo.transform.SetParent(hudCanvasRect, false);
+        flyoutRowRt = rowGo.GetComponent<RectTransform>();
+        flyoutRowRt.anchorMin = new Vector2(0f, 0.5f);
+        flyoutRowRt.anchorMax = new Vector2(0f, 0.5f);
+        flyoutRowRt.pivot     = new Vector2(0f, 0.5f);
+
+        var layout = rowGo.AddComponent<HorizontalLayoutGroup>();
+        layout.childAlignment         = TextAnchor.MiddleLeft;
+        layout.childControlWidth      = false;
+        layout.childControlHeight     = false;
+        layout.childForceExpandWidth  = false;
+        layout.childForceExpandHeight = false;
+        layout.spacing                = 10f;
+
+        var fitter = rowGo.AddComponent<ContentSizeFitter>();
+        fitter.horizontalFit = ContentSizeFitter.FitMode.PreferredSize;
+        fitter.verticalFit   = ContentSizeFitter.FitMode.PreferredSize;
+
+        var items = new List<RectTransform>();
+        foreach (var kind in CompoundToolOrder)
+        {
+            if (kind == compoundFace) continue;
+            var entry = compoundTools[kind];
+            entry.btn.gameObject.SetActive(true);
+            entry.rt.SetParent(rowGo.transform, false);
+            items.Add(entry.rt);
+        }
+
+        UpdateFlyoutPosition();
+
+        if (flyoutAnimRoutine != null) StopCoroutine(flyoutAnimRoutine);
+        flyoutAnimRoutine = StartCoroutine(AnimateFlyoutIn(items));
+    }
+
+    void CloseFlyout()
+    {
+        if (!FlyoutOpen) return;
+        if (flyoutAnimRoutine != null) { StopCoroutine(flyoutAnimRoutine); flyoutAnimRoutine = null; }
+
+        foreach (var kind in CompoundToolOrder)
+        {
+            if (kind == compoundFace) continue;
+            var entry = compoundTools[kind];
+            entry.btn.gameObject.SetActive(false);
+            entry.rt.SetParent(compoundPoolParent, false);
+        }
+
+        Destroy(flyoutRowRt.gameObject);
+        flyoutRowRt = null;
+        if (flyoutBackdropGo != null) { Destroy(flyoutBackdropGo); flyoutBackdropGo = null; }
+    }
+
+    void UpdateFlyoutPosition()
+    {
+        if (flyoutRowRt == null || hudCanvasRect == null) return;
+        RectTransform faceRt = compoundTools[compoundFace].rt;
+        Vector2 screenPoint = RectTransformUtility.WorldToScreenPoint(null, faceRt.position);
+        if (RectTransformUtility.ScreenPointToLocalPointInRectangle(hudCanvasRect, screenPoint, null, out Vector2 local))
+            flyoutRowRt.anchoredPosition = new Vector2(SidebarWidth + FlyoutGap, local.y);
+    }
+
+    /// <summary>Staggered ease-out-back scale-up for each flyout button in turn —
+    /// each one starts FlyoutStagger seconds after the previous, so they pop in
+    /// left-to-right like a short trail rather than all at once.</summary>
+    IEnumerator AnimateFlyoutIn(List<RectTransform> items)
+    {
+        foreach (var it in items) it.localScale = Vector3.zero;
+
+        float maxTime = items.Count > 0 ? (items.Count - 1) * FlyoutStagger + FlyoutItemDuration : 0f;
+        float t = 0f;
+        while (t < maxTime)
+        {
+            t += Time.unscaledDeltaTime;
+            for (int i = 0; i < items.Count; i++)
+            {
+                float local = Mathf.Clamp01((t - i * FlyoutStagger) / FlyoutItemDuration);
+                items[i].localScale = Vector3.one * EaseOutBack(local);
+            }
+            yield return null;
+        }
+        foreach (var it in items) it.localScale = Vector3.one;
+        flyoutAnimRoutine = null;
+    }
+
+    static float EaseOutBack(float t)
+    {
+        const float c1 = 1.70158f;
+        const float c3 = c1 + 1f;
+        float p = t - 1f;
+        return 1f + c3 * p * p * p + c1 * p * p;
+    }
+
+    /// <summary>Called by TutorialManager/Level4Guide: forcedTool == a value forces
+    /// the compound button's face to that tool and disables its flyout (only one
+    /// tool is allowed this step); null fully dims/disables the button instead
+    /// (the step doesn't involve it at all). Never leaves the flyout reachable
+    /// while a guided step's callout might be pointing at this same button — see
+    /// the class comment on why that matters.</summary>
+    public void SetCompoundToolLock(CompoundToolKind? forcedTool)
+    {
+        compoundGuided = true;
+        CloseFlyout();
+
+        if (forcedTool.HasValue)
+        {
+            if (forcedTool.Value != compoundFace) SelectCompoundFace(forcedTool.Value);
+            SidebarButtonLock.SetLocked(devicesCableBtn, false);
+        }
+        else
+        {
+            SidebarButtonLock.SetLocked(devicesCableBtn, true);
+        }
+    }
+
+    /// <summary>Called by TutorialManager for the one step that teaches the
+    /// right-click flyout itself (TutorialStep.TeachDeviceFlyout): unlike
+    /// SetCompoundToolLock, this leaves the button fully free — any of the
+    /// four tools reachable, flyout included — instead of forcing one.</summary>
+    public void SetCompoundToolUnrestricted()
+    {
+        compoundGuided = false;
+        CloseFlyout();
+        SidebarButtonLock.SetLocked(devicesCableBtn, false);
     }
 
     /// <summary>
@@ -428,7 +696,7 @@ public class NetworkUIManager : MonoBehaviour
     // The visible bar/text (the bottom "tips") was removed per request — but
     // statusLabel itself is still built and kept alive, invisible, because
     // Update() below both writes its .text AND drives the sidebar buttons'
-    // forced-active glow (cableFx/pingFx/etc.) behind the same
+    // forced-active glow (devicesCableFx/pingFx/etc.) behind the same
     // "if (statusLabel == null) return;" guard. Killing statusLabel entirely
     // would silently disable that glow tracking too, so the bar is hidden via
     // SetActive(false) instead of not being built at all.
@@ -594,6 +862,8 @@ public class NetworkUIManager : MonoBehaviour
 
     void Update()
     {
+        if (FlyoutOpen) UpdateFlyoutPosition();
+
         if (statusLabel == null) return;
 
         bool dragging        = DragDropManager.Instance      != null && DragDropManager.Instance.IsDragging;
@@ -609,16 +879,16 @@ public class NetworkUIManager : MonoBehaviour
         // (same visual language as hover) so the active tool stays obviously highlighted.
         pingFx?.SetForcedActive(pinging);
         sendPacketFx?.SetForcedActive(sendingPacket);
-        cableFx?.SetForcedActive(connecting);
         removeCableFx?.SetForcedActive(removingCable);
         removeDeviceFx?.SetForcedActive(removingDevice);
         tableFx?.SetForcedActive(placingTable || draggingTable);
 
-        // Same treatment for whichever device button (PC/Switch/Router) started the
-        // ghost currently being placed/repositioned.
-        DeviceType? draggingType = DragDropManager.Instance?.DraggingDeviceType;
-        foreach (var (type, fx) in deviceFx)
-            fx.SetForcedActive(draggingType == type);
+        // Same treatment for the devices/cable compound button — lit up while
+        // either a device ghost (PC/Switch/Router) or Cable mode is active,
+        // whichever the current face happens to be (see SelectCompoundFace —
+        // the face always matches whatever tool was just clicked, so this
+        // never needs to check which one specifically).
+        devicesCableFx?.SetForcedActive(dragging || connecting);
 
         if (dragging)
         {

@@ -57,6 +57,13 @@ public class TutorialManager : MonoBehaviour
     // key, enough to prove a deliberate press without feeling like a chore.
     const float PanThresholdDistance = 2f;
 
+    // How far below the devices/cable compound button's own row the callout gets
+    // nudged for the one step that leaves that button's flyout open to the player
+    // (TutorialStep.TeachDeviceFlyout) — clears the flyout's row height (one
+    // button tall) so the callout never sits underneath/behind the flyout it's
+    // describing. See TutorialUIManager.Show's offsetY param.
+    const float TeachFlyoutCalloutOffsetY = -200f;
+
     private bool qPressedThisStep;
     private bool ePressedThisStep;
     private Vector3? panBaselinePos;
@@ -71,6 +78,13 @@ public class TutorialManager : MonoBehaviour
         public DeviceType? HighlightDevice; // sidebar device button to highlight/unlock, if any
         public bool HighlightCable;          // highlight/unlock the Cable button instead
         public bool HighlightTable;          // highlight/unlock the Table button instead
+        // True only for the step that teaches NetworkUIManager's devices/cable
+        // compound button's right-click flyout (see BuildDevicesCableCompound):
+        // leaves that button fully unrestricted (any of the four tools reachable,
+        // flyout included) instead of forcing HighlightDevice/HighlightCable's
+        // tool directly, and nudges the callout below the flyout's row so the
+        // two never overlap — see EnterStep's offsetY.
+        public bool TeachDeviceFlyout;
         // Pure camera-control steps (zoom/rotate the view) — nothing is ever
         // placed yet this early, but this also locks out selecting/dragging
         // any already-placed device, so a step whose whole point is "learn to
@@ -149,7 +163,13 @@ public class TutorialManager : MonoBehaviour
     {
         if (!IsActive) return true;
         if (steps == null || stepIndex < 0 || stepIndex >= steps.Count) return false;
-        return steps[stepIndex].HighlightDevice == t;
+        var step = steps[stepIndex];
+        // The flyout-teaching step leaves NetworkUIManager's compound button
+        // genuinely unrestricted (see ApplyStepButtonLock) — this gate has to
+        // agree, or picking PC/Router from the flyout would swap the button's
+        // face but silently fail to start a ghost (StartDragging no-ops here).
+        if (step.TeachDeviceFlyout) return true;
+        return step.HighlightDevice == t;
     }
 
     // True while the current step is a pure camera-control step (see
@@ -337,8 +357,9 @@ public class TutorialManager : MonoBehaviour
             // while a PC ghost is still sticky-placing switches straight to it
             // (StartDragging cancels the stale ghost instead of no-oping) in one
             // click, so right-click is only ever optional here, not required.
-            new() { Text = "Now click <b>Switch</b> and place one on the table too — it's what connects your PCs together.",
+            new() { Text = "That button now holds every device. Right-click it to flip through the others, then pick <b>Switch</b> and place one on the table too — it's what connects your PCs together.",
                      HighlightDevice = DeviceType.Switch,
+                     TeachDeviceFlyout = true,
                      CheckCondition = () => placedSwitchCount >= 1,
                      WorldMarkers = () => (SwitchMarkerPos(), null) },
 
@@ -637,7 +658,8 @@ public class TutorialManager : MonoBehaviour
             ? (stepIndex == steps.Count - 1 ? "Continue" : "Next")
             : null;
 
-        TutorialUIManager.Instance?.Show(step.Text, target, buttonLabel);
+        float calloutOffsetY = step.TeachDeviceFlyout ? TeachFlyoutCalloutOffsetY : 0f;
+        TutorialUIManager.Instance?.Show(step.Text, target, buttonLabel, offsetY: calloutOffsetY);
 
         TutorialUIManager.Instance?.HideWorldMarkers();
         if (step.HighlightTable) TutorialUIManager.Instance?.SetMarkerColor(TableMarkerColor);
@@ -670,23 +692,35 @@ public class TutorialManager : MonoBehaviour
 
     // ── Sidebar locking ───────────────────────────────────────────────────────
     // Two layers:
-    //  1. Router/Ping/Send Packet/Remove Cable/Remove Device are hidden outright
-    //     for the whole tutorial — the sidebar itself stays uncluttered.
-    //  2. Of the four core buttons (PC/Switch/Table/Cable) that DO stay visible,
-    //     only the one relevant to the CURRENT step is actually clickable — the
-    //     other three are dimmed and non-interactable, so the player is forced
-    //     to complete each task in order instead of skipping ahead.
+    //  1. Ping/Send Packet/Remove Cable/Remove Device are hidden outright for
+    //     the whole tutorial — the sidebar itself stays uncluttered. Router
+    //     never appears either, but it can't be hidden on its own anymore: it
+    //     now shares NetworkUIManager's single devices/cable compound button
+    //     with PC/Switch/Cable (see BuildDevicesCableCompound), so Router
+    //     simply never becomes the forced tool in any step below.
+    //  2. Of the compound button and Table — the two that DO stay visible —
+    //     only the one relevant to the CURRENT step is actually usable. The
+    //     compound button is forced to exactly one tool (its flyout disabled,
+    //     so the player can't pick anything else) rather than dimmed, since
+    //     dimming would also hide/disable the other two tools folded into it.
 
     void HideUnneededButtons()
     {
         var ui = NetworkUIManager.Instance;
         if (ui == null) return;
 
-        SidebarButtonLock.SetActive(ui.GetDeviceButton(DeviceType.Router), false);
         SidebarButtonLock.SetActive(ui.PingButton, false);
         SidebarButtonLock.SetActive(ui.SendPacketButton, false);
         SidebarButtonLock.SetActive(ui.RemoveCableButton, false);
         SidebarButtonLock.SetActive(ui.RemoveDeviceButton, false);
+    }
+
+    static CompoundToolKind? DeriveCompoundTool(TutorialStep step)
+    {
+        if (step.HighlightDevice == DeviceType.PC) return CompoundToolKind.PC;
+        if (step.HighlightDevice == DeviceType.Switch) return CompoundToolKind.Switch;
+        if (step.HighlightCable) return CompoundToolKind.Cable;
+        return null;
     }
 
     void ApplyStepButtonLock(TutorialStep step)
@@ -694,10 +728,9 @@ public class TutorialManager : MonoBehaviour
         var ui = NetworkUIManager.Instance;
         if (ui == null) return;
 
-        SidebarButtonLock.SetLocked(ui.GetDeviceButton(DeviceType.PC), step.HighlightDevice != DeviceType.PC);
-        SidebarButtonLock.SetLocked(ui.GetDeviceButton(DeviceType.Switch), step.HighlightDevice != DeviceType.Switch);
+        if (step.TeachDeviceFlyout) ui.SetCompoundToolUnrestricted();
+        else ui.SetCompoundToolLock(DeriveCompoundTool(step));
         SidebarButtonLock.SetLocked(ui.TableButton, !step.HighlightTable);
-        SidebarButtonLock.SetLocked(ui.CableButton, !step.HighlightCable);
     }
 
     // Small pause between the final step's "network is live" message and the

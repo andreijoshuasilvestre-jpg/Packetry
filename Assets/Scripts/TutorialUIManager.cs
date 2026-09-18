@@ -88,6 +88,7 @@ public class TutorialUIManager : MonoBehaviour
     private TextMeshProUGUI bodyText;
     private RectTransform lastTarget;   // remembered so UpdateText() can reposition after a resize
     private float lastOffsetX;
+    private float lastOffsetY;
     private GameObject actionButtonGo;
     private TextMeshProUGUI actionButtonLabel;
     private GameObject skipButtonGo;
@@ -327,16 +328,22 @@ public class TutorialUIManager : MonoBehaviour
     /// <summary>offsetX overrides the callout's default horizontal position (PanelOffsetX,
     /// which clears the 300px sidebar) — pass a smaller value for a level whose sidebar
     /// is entirely hidden (see Level3Guide), where the wider default gap just wastes
-    /// screen space. Leave null for the normal sidebar-clearing position.</summary>
-    public void Show(string text, RectTransform target, string buttonLabel, float? offsetX = null)
+    /// screen space. Leave null for the normal sidebar-clearing position. offsetY nudges
+    /// the callout vertically away from target's own height — used for the one tutorial
+    /// step that leaves NetworkUIManager's devices/cable compound button unrestricted
+    /// (TutorialStep.TeachDeviceFlyout) so its right-click flyout has room to open
+    /// without the callout sitting on top of it (the highlight beacon still attaches to
+    /// the real target regardless of this offset).</summary>
+    public void Show(string text, RectTransform target, string buttonLabel, float? offsetX = null, float offsetY = 0f)
     {
         skipButtonGo.SetActive(true);
         SetCalloutVisible(true);
         bodyText.text = ApplyKeyChips(text);
         lastTarget   = target;
         lastOffsetX  = offsetX ?? PanelOffsetX;
+        lastOffsetY  = offsetY;
         AutoSizeCallout();
-        PositionPanel(lastTarget, lastOffsetX);
+        PositionPanel(lastTarget, lastOffsetX, lastOffsetY);
         PlayPopInAndBounce();
         PlayTyping();
 
@@ -372,7 +379,7 @@ public class TutorialUIManager : MonoBehaviour
     {
         bodyText.text = ApplyKeyChips(text);
         AutoSizeCallout();
-        PositionPanel(lastTarget, lastOffsetX);
+        PositionPanel(lastTarget, lastOffsetX, lastOffsetY);
         PlayTyping();
     }
 
@@ -500,7 +507,7 @@ public class TutorialUIManager : MonoBehaviour
         panelRect.sizeDelta = new Vector2(PanelWidth, height);
     }
 
-    void PositionPanel(RectTransform target, float offsetX)
+    void PositionPanel(RectTransform target, float offsetX, float offsetY = 0f)
     {
         float y = 0f;
         if (target != null)
@@ -509,6 +516,7 @@ public class TutorialUIManager : MonoBehaviour
             if (RectTransformUtility.ScreenPointToLocalPointInRectangle(canvasRect, screenPoint, null, out Vector2 local))
                 y = local.y;
         }
+        y += offsetY;
 
         float panelHeight = panelRect.sizeDelta.y;
         float maxY = Mathf.Max(0f, canvasRect.rect.height * 0.5f - panelHeight * 0.5f - 20f);
