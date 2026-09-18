@@ -196,6 +196,7 @@ public class TableManager : MonoBehaviour
             (CableManager.Instance == null || !CableManager.Instance.IsConnecting) &&
             (CableRemoverManager.Instance == null || !CableRemoverManager.Instance.IsRemoving) &&
             (DeviceRemoverManager.Instance == null || !DeviceRemoverManager.Instance.IsRemoving) &&
+            (TableRemoverManager.Instance == null || !TableRemoverManager.Instance.IsRemoving) &&
             (PingToolManager.Instance == null || !PingToolManager.Instance.IsPinging) &&
             (PacketSendManager.Instance == null || !PacketSendManager.Instance.IsSending))
         {

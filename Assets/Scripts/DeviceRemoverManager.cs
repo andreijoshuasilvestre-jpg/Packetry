@@ -8,7 +8,11 @@ using UnityEngine.InputSystem;
 ///
 /// Usage:
 ///   1. Call BeginRemoving() (wired to the "Remove Device" UI button).
-///   2. Hovering a placed device highlights it red.
+///   2. Hovering a placed device shows the same arrow+outline+ring
+///      SelectionIndicator DragDropManager uses for a click-selected device
+///      (see DragDropManager.ApplyHighlightTint), just red instead of cyan —
+///      a "target for deletion" hover, not a selection. Mirrors
+///      CableRemoverManager's own red SelectionIndicator.
 ///   3. Click it → the device is deleted; mode exits.
 ///   Right-click or BeginRemoving() again cancels the current operation.
 /// </summary>
@@ -21,7 +25,7 @@ public class DeviceRemoverManager : MonoBehaviour
     private bool isRemoving;
     private Camera mainCamera;
     private NetworkDevice hoveredDevice;
-    private MaterialPropertyBlock propBlock;
+    private SelectionIndicator selectionIndicator;
 
     public bool IsRemoving => isRemoving;
 
@@ -39,6 +43,9 @@ public class DeviceRemoverManager : MonoBehaviour
     void Start()
     {
         mainCamera = Camera.main;
+
+        selectionIndicator = new GameObject("_DeviceRemoveSelectionIndicator").AddComponent<SelectionIndicator>();
+        selectionIndicator.SetColor(highlightColor);
     }
 
     void Update()
@@ -78,23 +85,25 @@ public class DeviceRemoverManager : MonoBehaviour
 
     void SetHighlight(NetworkDevice device, bool on)
     {
-        if (device == null) return;
-        propBlock ??= new MaterialPropertyBlock();
-        foreach (var r in device.GetComponentsInChildren<Renderer>())
-        {
-            if (on)
-            {
-                string prop = r.sharedMaterial.HasProperty("_BaseColor") ? "_BaseColor" : "_Color";
-                Color orig = r.sharedMaterial.GetColor(prop);
-                propBlock.Clear();
-                propBlock.SetColor(prop, Color.Lerp(orig, highlightColor, 0.55f));
-                r.SetPropertyBlock(propBlock);
-            }
-            else
-            {
-                r.SetPropertyBlock(null);
-            }
-        }
+        if (selectionIndicator == null) return;
+        if (!on || device == null) { selectionIndicator.Hide(); return; }
+
+        var (groundCenter, footprintXZ) = ComputeGroundFootprint(device);
+        selectionIndicator.ShowOnMesh(device.transform, device.VisualTopPoint(), groundCenter, footprintXZ);
+    }
+
+    // Mirrors DragDropManager.ComputeGroundFootprint exactly — same reasoning
+    // (device's own combined renderer bounds, base-centered) for the ring.
+    static (Vector3 center, Vector2 footprintXZ) ComputeGroundFootprint(NetworkDevice device)
+    {
+        var renderers = device.GetComponentsInChildren<Renderer>();
+        if (renderers.Length == 0) return (device.transform.position, Vector2.one * 0.5f);
+
+        Bounds b = renderers[0].bounds;
+        for (int i = 1; i < renderers.Length; i++)
+            b.Encapsulate(renderers[i].bounds);
+
+        return (new Vector3(b.center.x, b.min.y, b.center.z), new Vector2(b.size.x, b.size.z));
     }
 
     void RemoveHovered()
@@ -102,6 +111,7 @@ public class DeviceRemoverManager : MonoBehaviour
         var device = hoveredDevice;
         hoveredDevice = null;
         if (device == null) return;
+        selectionIndicator?.Hide(); // about to be destroyed — don't leave the outline tracking it
         OnDeviceRemoved?.Invoke(device);
         Destroy(device.gameObject);
     }

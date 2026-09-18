@@ -154,6 +154,7 @@ public class GameBootstrap : MonoBehaviour
         EnsureComponent<CableRemoverManager>("CableRemoverManager");
         EnsureComponent<DeviceRemoverManager>("DeviceRemoverManager");
         EnsureComponent<TableManager>("TableManager");
+        EnsureComponent<TableRemoverManager>("TableRemoverManager");
         EnsureComponent<PingToolManager>("PingToolManager");
         EnsureComponent<PacketManager>("PacketManager");
         EnsureComponent<PacketSendManager>("PacketSendManager");

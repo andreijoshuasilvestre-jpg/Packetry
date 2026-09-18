@@ -267,6 +267,7 @@ public class DragDropManager : MonoBehaviour
         else if ((CableManager.Instance == null || !CableManager.Instance.IsConnecting) &&
                  (CableRemoverManager.Instance == null || !CableRemoverManager.Instance.IsRemoving) &&
                  (DeviceRemoverManager.Instance == null || !DeviceRemoverManager.Instance.IsRemoving) &&
+                 (TableRemoverManager.Instance == null || !TableRemoverManager.Instance.IsRemoving) &&
                  (TableManager.Instance == null || !TableManager.Instance.IsPlacing) &&
                  (TableManager.Instance == null || !TableManager.Instance.IsDragging) &&
                  (PingToolManager.Instance == null || !PingToolManager.Instance.IsPinging) &&

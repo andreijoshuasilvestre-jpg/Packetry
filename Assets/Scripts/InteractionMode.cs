@@ -23,6 +23,10 @@ public static class InteractionMode
             DeviceRemoverManager.Instance != null && DeviceRemoverManager.Instance.IsRemoving)
             DeviceRemoverManager.Instance.CancelRemoving();
 
+        if (activating != TableRemoverManager.Instance &&
+            TableRemoverManager.Instance != null && TableRemoverManager.Instance.IsRemoving)
+            TableRemoverManager.Instance.CancelRemoving();
+
         if (activating != TableManager.Instance &&
             TableManager.Instance != null && TableManager.Instance.IsPlacing)
             TableManager.Instance.CancelPlacing();

@@ -34,6 +34,7 @@ public class AutoSaveManager : MonoBehaviour
         if (TableManager.Instance != null) TableManager.Instance.OnTablePlaced += HandleTableChanged;
         if (TaskManager.Instance != null) TaskManager.Instance.OnTasksChanged += HandleTasksChanged;
         if (DeviceRemoverManager.Instance != null) DeviceRemoverManager.Instance.OnDeviceRemoved += HandleDeviceRemoved;
+        if (TableRemoverManager.Instance != null) TableRemoverManager.Instance.OnTableRemoved += HandleTableRemoved;
         // Router interface IPs only ever change through CLI commands, which
         // aren't covered by any event above — save once the player is done
         // editing a device's CLI panel, not on every keystroke.
@@ -51,6 +52,7 @@ public class AutoSaveManager : MonoBehaviour
         if (TableManager.Instance != null) TableManager.Instance.OnTablePlaced -= HandleTableChanged;
         if (TaskManager.Instance != null) TaskManager.Instance.OnTasksChanged -= HandleTasksChanged;
         if (DeviceRemoverManager.Instance != null) DeviceRemoverManager.Instance.OnDeviceRemoved -= HandleDeviceRemoved;
+        if (TableRemoverManager.Instance != null) TableRemoverManager.Instance.OnTableRemoved -= HandleTableRemoved;
         if (CLIPanelManager.Instance != null) CLIPanelManager.Instance.OnPanelClosed -= HandlePanelClosed;
     }
 
@@ -59,6 +61,7 @@ public class AutoSaveManager : MonoBehaviour
     void HandleTableChanged(Table table) => SaveNow();
     void HandleTasksChanged() => SaveNow();
     void HandleDeviceRemoved(NetworkDevice device) => SaveNow();
+    void HandleTableRemoved(Table table) => SaveNow();
     void HandlePanelClosed(NetworkDevice device) => SaveNow();
 
     /// <summary>Captures the live scene and writes it to disk for the current level.

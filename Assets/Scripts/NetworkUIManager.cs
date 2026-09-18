@@ -1,5 +1,3 @@
-using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.SceneManagement;
@@ -8,6 +6,10 @@ using TMPro;
 /// <summary>The four tools folded into NetworkUIManager's single devices/cable
 /// sidebar button — see BuildDevicesCableCompound.</summary>
 public enum CompoundToolKind { PC, Switch, Router, Cable }
+
+/// <summary>The three tools folded into NetworkUIManager's single remove
+/// sidebar button — see BuildRemoveCompound.</summary>
+public enum RemoveToolKind { Cable, Device, Table }
 
 /// <summary>
 /// Builds the game HUD:
@@ -22,10 +24,6 @@ public class NetworkUIManager : MonoBehaviour
     public static NetworkUIManager Instance { get; private set; }
 
     private TextMeshProUGUI statusLabel;
-    private Button removeCableBtn;
-    private SidebarIconButtonFX removeCableFx;
-    private Button removeDeviceBtn;
-    private SidebarIconButtonFX removeDeviceFx;
     private Button tableBtn;
     private SidebarIconButtonFX tableFx;
     private Button pingBtn;
@@ -33,30 +31,12 @@ public class NetworkUIManager : MonoBehaviour
     private Button sendPacketBtn;
     private SidebarIconButtonFX sendPacketFx;
 
-    // ── Devices + Cable compound button state (see BuildDevicesCableCompound) ──
+    // Devices/Cable and Remove are each a single sidebar entry that flips
+    // through several tools via right-click flyout — see CompoundSidebarGroup
+    // and BuildDevicesCableCompound/BuildRemoveCompound.
     private RectTransform hudCanvasRect;
-    private readonly Dictionary<CompoundToolKind, (Button btn, SidebarIconButtonFX fx, RectTransform rt)> compoundTools = new();
-    private static readonly CompoundToolKind[] CompoundToolOrder =
-        { CompoundToolKind.PC, CompoundToolKind.Switch, CompoundToolKind.Router, CompoundToolKind.Cable };
-    private Transform compoundListParent; // sidebar Content — where the current face button lives
-    private Transform compoundPoolParent; // inactive holding area for the other three
-    private CompoundToolKind compoundFace = CompoundToolKind.PC;
-    // True from the first SetCompoundToolLock call onward (forced-tool OR fully-locked
-    // alike) — a tutorial/guide step is managing this button, so its flyout stays
-    // disabled regardless of Button.interactable (which SidebarButtonLock's dimming
-    // relies on, but which does NOT stop a separate IPointerClickHandler like
-    // RightClickHandler from still firing on the same GameObject).
-    private bool compoundGuided;
-    private Button devicesCableBtn;
-    private SidebarIconButtonFX devicesCableFx;
-    private RectTransform flyoutRowRt;
-    private GameObject flyoutBackdropGo;
-    private Coroutine flyoutAnimRoutine;
-    private bool FlyoutOpen => flyoutRowRt != null;
-
-    const float FlyoutGap          = 10f;   // gap between the sidebar's right edge and the first flyout button
-    const float FlyoutItemDuration = 0.22f; // each flyout button's own scale-in
-    const float FlyoutStagger      = 0.07f; // delay before the next button starts, for the "trail" effect
+    private CompoundSidebarGroup<CompoundToolKind> devicesGroup;
+    private CompoundSidebarGroup<RemoveToolKind> removeGroup;
 
     private static readonly Color SidebarBg = new Color(0.06f, 0.08f, 0.13f, 0.95f);
 
@@ -69,6 +49,7 @@ public class NetworkUIManager : MonoBehaviour
     private static readonly Color IconCable   = new Color(0.55f, 0.75f, 1.00f, 1f);
     private static readonly Color IconRemove  = new Color(0.95f, 0.40f, 0.40f, 1f);
     private static readonly Color IconRemoveDevice = new Color(0.95f, 0.55f, 0.30f, 1f);
+    private static readonly Color IconRemoveTable  = new Color(0.90f, 0.62f, 0.30f, 1f);
     private static readonly Color IconTable   = new Color(0.80f, 0.65f, 0.40f, 1f);
     private static readonly Color IconPing    = new Color(0.35f, 0.95f, 0.80f, 1f);
     private static readonly Color IconSendPacket = new Color(0.80f, 0.55f, 0.95f, 1f);
@@ -80,7 +61,7 @@ public class NetworkUIManager : MonoBehaviour
     private static readonly Color IconSettings = new Color(0.75f, 0.78f, 0.85f, 1f);
     private static readonly Color IconExit     = new Color(0.90f, 0.30f, 0.30f, 1f);
 
-    private enum ButtonKind { RemoveCable, RemoveDevice, Table, Ping, SendPacket }
+    private enum ButtonKind { Table, Ping, SendPacket }
 
     void Awake()
     {
@@ -99,18 +80,21 @@ public class NetworkUIManager : MonoBehaviour
     // BuildDevicesCableCompound) — every one of these accessors resolves to
     // it regardless of which DeviceType is asked for, which is what lets
     // TutorialManager/Level4Guide's existing per-device Highlight targeting
-    // keep working unchanged.
-    public Button GetDeviceButton(DeviceType t) => devicesCableBtn;
-    public RectTransform GetDeviceButtonRect(DeviceType t) => devicesCableBtn != null ? devicesCableBtn.transform as RectTransform : null;
-    public Button CableButton => devicesCableBtn;
-    public RectTransform CableButtonRect => devicesCableBtn != null ? devicesCableBtn.transform as RectTransform : null;
+    // keep working unchanged. Same story for Remove Cable/Device/Table below,
+    // now folded into the remove compound button (see BuildRemoveCompound).
+    public Button GetDeviceButton(DeviceType t) => devicesGroup?.FaceButton;
+    public RectTransform GetDeviceButtonRect(DeviceType t) => devicesGroup?.FaceRect;
+    public Button CableButton => devicesGroup?.FaceButton;
+    public RectTransform CableButtonRect => devicesGroup?.FaceRect;
     public Button TableButton => tableBtn;
     public RectTransform TableButtonRect => tableBtn != null ? tableBtn.transform as RectTransform : null;
     public Button PingButton => pingBtn;
     public RectTransform PingButtonRect => pingBtn != null ? pingBtn.transform as RectTransform : null;
     public Button SendPacketButton => sendPacketBtn;
-    public Button RemoveCableButton => removeCableBtn;
-    public Button RemoveDeviceButton => removeDeviceBtn;
+    public RectTransform SendPacketButtonRect => sendPacketBtn != null ? sendPacketBtn.transform as RectTransform : null;
+    public Button RemoveCableButton => removeGroup?.FaceButton;
+    public Button RemoveDeviceButton => removeGroup?.FaceButton;
+    public Button RemoveTableButton => removeGroup?.FaceButton;
 
     void BuildCanvas()
     {
@@ -246,7 +230,7 @@ public class NetworkUIManager : MonoBehaviour
         layout.childControlHeight      = false;
         layout.childForceExpandWidth   = false;
         layout.childForceExpandHeight  = false;
-        layout.spacing                 = 10f;
+        layout.spacing                 = 16f; // extra room over the old 10f so SidebarIconButtonFX's hover scale-up doesn't touch neighboring buttons
         layout.padding                 = new RectOffset(0, 0, 10, 10);
 
         var fitter = contentGo.AddComponent<ContentSizeFitter>();
@@ -269,8 +253,6 @@ public class NetworkUIManager : MonoBehaviour
             ("Table",  IconTable,  ButtonKind.Table,  "Table",       "Table_Icon_Clicked"),
             ("Ping",   IconPing,   ButtonKind.Ping,   "Ping",        "Ping_Icon_Clicked"),
             ("Send Packet", IconSendPacket, ButtonKind.SendPacket, "SendPackets",     "SendPacket_Icon_Clicked"),
-            ("Remove Cable",  IconRemove,       ButtonKind.RemoveCable,  "RemoveCable_Icon",  "RemoveCable_Icon_Clicked"),
-            ("Remove Device", IconRemoveDevice, ButtonKind.RemoveDevice, "RemoveDevice_Icon", "RemoveDevice_Icon_Clicked"),
         };
 
         float buttonWidth = SidebarButtonWidth * SidebarButtonScale;
@@ -283,14 +265,6 @@ public class NetworkUIManager : MonoBehaviour
 
             switch (kind)
             {
-                case ButtonKind.RemoveCable:
-                    removeCableBtn = btn; removeCableFx = fx;
-                    btn.onClick.AddListener(OnRemoveCableClicked);
-                    break;
-                case ButtonKind.RemoveDevice:
-                    removeDeviceBtn = btn; removeDeviceFx = fx;
-                    btn.onClick.AddListener(OnRemoveDeviceClicked);
-                    break;
                 case ButtonKind.Table:
                     tableBtn = btn; tableFx = fx;
                     btn.onClick.AddListener(OnTableClicked);
@@ -305,32 +279,23 @@ public class NetworkUIManager : MonoBehaviour
                     break;
             }
         }
+
+        BuildRemoveCompound(contentGo.transform, buttonWidth);
     }
 
-    // ── Devices + Cable compound button ─────────────────────────────────────
-    // Folds what used to be four separate sidebar entries (PC/Switch/Router/
-    // Cable) into one: a single button showing whichever tool is currently
-    // "the face" (PC by default) — left-click uses it immediately, same as
-    // before. Right-click reveals the other three as a horizontal flyout that
-    // flares out past the sidebar's right edge into the play area; clicking
-    // one swaps it in as the new face and closes the flyout.
-    //
-    // All four tool buttons are built once, up front, via the same
-    // CreateSidebarButton used everywhere else in this file (identical art/
-    // FX/fallback handling) — only ONE of them is ever parented into the
-    // sidebar's Content list at a time (the current face); the other three
-    // sit inactive in compoundPoolParent until the flyout borrows them.
-    // TutorialManager/Level4Guide drive SetCompoundToolLock to force a single
-    // tool (and disable the flyout) during a guided step — see that method.
+    // ── Devices + Cable / Remove compound buttons ────────────────────────────
+    // Each folds several sidebar entries into one CompoundSidebarGroup (see
+    // that class): a single button shows whichever tool is currently "the
+    // face" — left-click uses it immediately — and right-click reveals the
+    // others as a horizontal flyout past the sidebar's right edge. Both
+    // groups are built the same way: create every tool's real button via the
+    // usual CreateSidebarButton, wire its own domain action, then hand it to
+    // the group with Register(); Build() parks everything but the initial
+    // face in an inactive pool until the flyout borrows it.
 
     void BuildDevicesCableCompound(Transform listParent, float buttonWidth)
     {
-        compoundListParent = listParent;
-
-        var poolGo = new GameObject("CompoundToolPool", typeof(RectTransform));
-        poolGo.transform.SetParent(transform, false);
-        poolGo.SetActive(false);
-        compoundPoolParent = poolGo.transform;
+        devicesGroup = new CompoundSidebarGroup<CompoundToolKind>(this, hudCanvasRect);
 
         var art = new (CompoundToolKind kind, string label, Color glow, string iconSprite, string hoverSprite)[]
         {
@@ -354,191 +319,50 @@ public class NetworkUIManager : MonoBehaviour
                 btn.onClick.AddListener(() => DragDropManager.Instance?.StartDragging(dt));
             }
 
-            // Fires after the tool's own action above: makes this the new
-            // face (or, if it's already the face — the normal non-flyout
-            // click path — just closes the flyout if one was somehow open).
-            CompoundToolKind capturedKind = kind;
-            btn.onClick.AddListener(() => SelectCompoundFace(capturedKind));
-
-            var relay = btn.gameObject.AddComponent<RightClickHandler>();
-            relay.onRightClick = ToggleFlyout;
-
-            compoundTools[kind] = (btn, fx, btn.transform as RectTransform);
+            devicesGroup.Register(kind, btn, fx);
         }
 
-        devicesCableBtn = compoundTools[compoundFace].btn;
-        devicesCableFx  = compoundTools[compoundFace].fx;
+        devicesGroup.Build(listParent, CompoundToolKind.PC);
+    }
 
-        foreach (var kind in CompoundToolOrder)
+    void BuildRemoveCompound(Transform listParent, float buttonWidth)
+    {
+        removeGroup = new CompoundSidebarGroup<RemoveToolKind>(this, hudCanvasRect);
+
+        var art = new (RemoveToolKind kind, string label, Color glow, string iconSprite, string hoverSprite)[]
         {
-            if (kind == compoundFace) continue;
-            var entry = compoundTools[kind];
-            entry.rt.SetParent(compoundPoolParent, false);
-            entry.btn.gameObject.SetActive(false);
-        }
-        devicesCableBtn.transform.SetSiblingIndex(0);
-    }
+            (RemoveToolKind.Cable,  "Remove Cable",  IconRemove,       "RemoveCable_Icon",  "RemoveCable_Icon_Clicked"),
+            (RemoveToolKind.Device, "Remove Device", IconRemoveDevice, "RemoveDevice_Icon", "RemoveDevice_Icon_Clicked"),
+            (RemoveToolKind.Table,  "Remove Table",  IconRemoveTable,  "RemoveTable",       "RemoveTable_Hovered"),
+        };
 
-    void SelectCompoundFace(CompoundToolKind kind)
-    {
-        if (kind == compoundFace) { CloseFlyout(); return; }
-
-        var oldEntry = compoundTools[compoundFace];
-        oldEntry.rt.SetParent(compoundPoolParent, false);
-        oldEntry.btn.gameObject.SetActive(false);
-
-        compoundFace = kind;
-        var newEntry = compoundTools[kind];
-        newEntry.rt.SetParent(compoundListParent, false);
-        newEntry.rt.SetSiblingIndex(0);
-        newEntry.btn.gameObject.SetActive(true);
-
-        devicesCableBtn = newEntry.btn;
-        devicesCableFx  = newEntry.fx;
-
-        CloseFlyout();
-    }
-
-    void ToggleFlyout()
-    {
-        if (compoundGuided) return; // a tutorial/guide step is managing this button — see SetCompoundToolLock
-        if (FlyoutOpen) CloseFlyout();
-        else OpenFlyout();
-    }
-
-    void OpenFlyout()
-    {
-        // Full-screen invisible catch-all — a click anywhere outside the
-        // flyout's own buttons closes it, same as any other dropdown/flyout
-        // (this also naturally covers "click the face button again" and
-        // "click elsewhere in the game", both of which should just close it).
-        flyoutBackdropGo = new GameObject("FlyoutBackdrop", typeof(RectTransform));
-        flyoutBackdropGo.transform.SetParent(hudCanvasRect, false);
-        var backdropImg = flyoutBackdropGo.AddComponent<Image>();
-        backdropImg.color = new Color(0f, 0f, 0f, 0f);
-        var bdRt = flyoutBackdropGo.GetComponent<RectTransform>();
-        bdRt.anchorMin = Vector2.zero;
-        bdRt.anchorMax = Vector2.one;
-        bdRt.offsetMin = Vector2.zero;
-        bdRt.offsetMax = Vector2.zero;
-        var backdropBtn = flyoutBackdropGo.AddComponent<Button>();
-        backdropBtn.transition    = Selectable.Transition.None;
-        backdropBtn.targetGraphic = backdropImg;
-        backdropBtn.onClick.AddListener(CloseFlyout);
-
-        var rowGo = new GameObject("DevicesFlyout", typeof(RectTransform));
-        rowGo.transform.SetParent(hudCanvasRect, false);
-        flyoutRowRt = rowGo.GetComponent<RectTransform>();
-        flyoutRowRt.anchorMin = new Vector2(0f, 0.5f);
-        flyoutRowRt.anchorMax = new Vector2(0f, 0.5f);
-        flyoutRowRt.pivot     = new Vector2(0f, 0.5f);
-
-        var layout = rowGo.AddComponent<HorizontalLayoutGroup>();
-        layout.childAlignment         = TextAnchor.MiddleLeft;
-        layout.childControlWidth      = false;
-        layout.childControlHeight     = false;
-        layout.childForceExpandWidth  = false;
-        layout.childForceExpandHeight = false;
-        layout.spacing                = 10f;
-
-        var fitter = rowGo.AddComponent<ContentSizeFitter>();
-        fitter.horizontalFit = ContentSizeFitter.FitMode.PreferredSize;
-        fitter.verticalFit   = ContentSizeFitter.FitMode.PreferredSize;
-
-        var items = new List<RectTransform>();
-        foreach (var kind in CompoundToolOrder)
+        foreach (var (kind, label, glow, iconSprite, hoverSprite) in art)
         {
-            if (kind == compoundFace) continue;
-            var entry = compoundTools[kind];
-            entry.btn.gameObject.SetActive(true);
-            entry.rt.SetParent(rowGo.transform, false);
-            items.Add(entry.rt);
-        }
+            var (btn, fx) = CreateSidebarButton(listParent, label, glow, buttonWidth, iconSprite, hoverSprite);
 
-        UpdateFlyoutPosition();
-
-        if (flyoutAnimRoutine != null) StopCoroutine(flyoutAnimRoutine);
-        flyoutAnimRoutine = StartCoroutine(AnimateFlyoutIn(items));
-    }
-
-    void CloseFlyout()
-    {
-        if (!FlyoutOpen) return;
-        if (flyoutAnimRoutine != null) { StopCoroutine(flyoutAnimRoutine); flyoutAnimRoutine = null; }
-
-        foreach (var kind in CompoundToolOrder)
-        {
-            if (kind == compoundFace) continue;
-            var entry = compoundTools[kind];
-            entry.btn.gameObject.SetActive(false);
-            entry.rt.SetParent(compoundPoolParent, false);
-        }
-
-        Destroy(flyoutRowRt.gameObject);
-        flyoutRowRt = null;
-        if (flyoutBackdropGo != null) { Destroy(flyoutBackdropGo); flyoutBackdropGo = null; }
-    }
-
-    void UpdateFlyoutPosition()
-    {
-        if (flyoutRowRt == null || hudCanvasRect == null) return;
-        RectTransform faceRt = compoundTools[compoundFace].rt;
-        Vector2 screenPoint = RectTransformUtility.WorldToScreenPoint(null, faceRt.position);
-        if (RectTransformUtility.ScreenPointToLocalPointInRectangle(hudCanvasRect, screenPoint, null, out Vector2 local))
-            flyoutRowRt.anchoredPosition = new Vector2(SidebarWidth + FlyoutGap, local.y);
-    }
-
-    /// <summary>Staggered ease-out-back scale-up for each flyout button in turn —
-    /// each one starts FlyoutStagger seconds after the previous, so they pop in
-    /// left-to-right like a short trail rather than all at once.</summary>
-    IEnumerator AnimateFlyoutIn(List<RectTransform> items)
-    {
-        foreach (var it in items) it.localScale = Vector3.zero;
-
-        float maxTime = items.Count > 0 ? (items.Count - 1) * FlyoutStagger + FlyoutItemDuration : 0f;
-        float t = 0f;
-        while (t < maxTime)
-        {
-            t += Time.unscaledDeltaTime;
-            for (int i = 0; i < items.Count; i++)
+            switch (kind)
             {
-                float local = Mathf.Clamp01((t - i * FlyoutStagger) / FlyoutItemDuration);
-                items[i].localScale = Vector3.one * EaseOutBack(local);
+                case RemoveToolKind.Cable:  btn.onClick.AddListener(OnRemoveCableClicked);  break;
+                case RemoveToolKind.Device: btn.onClick.AddListener(OnRemoveDeviceClicked); break;
+                case RemoveToolKind.Table:  btn.onClick.AddListener(OnRemoveTableClicked);  break;
             }
-            yield return null;
-        }
-        foreach (var it in items) it.localScale = Vector3.one;
-        flyoutAnimRoutine = null;
-    }
 
-    static float EaseOutBack(float t)
-    {
-        const float c1 = 1.70158f;
-        const float c3 = c1 + 1f;
-        float p = t - 1f;
-        return 1f + c3 * p * p * p + c1 * p * p;
+            removeGroup.Register(kind, btn, fx);
+        }
+
+        removeGroup.Build(listParent, RemoveToolKind.Cable);
     }
 
     /// <summary>Called by TutorialManager/Level4Guide: forcedTool == a value forces
-    /// the compound button's face to that tool and disables its flyout (only one
-    /// tool is allowed this step); null fully dims/disables the button instead
-    /// (the step doesn't involve it at all). Never leaves the flyout reachable
-    /// while a guided step's callout might be pointing at this same button — see
-    /// the class comment on why that matters.</summary>
+    /// the devices/cable compound button's face to that tool and disables its
+    /// flyout (only one tool is allowed this step); null fully dims/disables the
+    /// button instead (the step doesn't involve it at all). Never leaves the
+    /// flyout reachable while a guided step's callout might be pointing at this
+    /// same button — see CompoundSidebarGroup's class comment.</summary>
     public void SetCompoundToolLock(CompoundToolKind? forcedTool)
     {
-        compoundGuided = true;
-        CloseFlyout();
-
-        if (forcedTool.HasValue)
-        {
-            if (forcedTool.Value != compoundFace) SelectCompoundFace(forcedTool.Value);
-            SidebarButtonLock.SetLocked(devicesCableBtn, false);
-        }
-        else
-        {
-            SidebarButtonLock.SetLocked(devicesCableBtn, true);
-        }
+        devicesGroup.SetLock(forcedTool);
+        SidebarButtonLock.SetLocked(devicesGroup.FaceButton, !forcedTool.HasValue);
     }
 
     /// <summary>Called by TutorialManager for the one step that teaches the
@@ -547,9 +371,8 @@ public class NetworkUIManager : MonoBehaviour
     /// four tools reachable, flyout included — instead of forcing one.</summary>
     public void SetCompoundToolUnrestricted()
     {
-        compoundGuided = false;
-        CloseFlyout();
-        SidebarButtonLock.SetLocked(devicesCableBtn, false);
+        devicesGroup.SetUnrestricted();
+        SidebarButtonLock.SetLocked(devicesGroup.FaceButton, false);
     }
 
     /// <summary>
@@ -595,7 +418,10 @@ public class NetworkUIManager : MonoBehaviour
         rt.pivot            = new Vector2(0.5f, 1f);
         rt.sizeDelta        = new Vector2(width, height);
 
-        // Glow (soft halo behind the artwork, hidden until clicked)
+        // Glow (soft halo behind the artwork, hidden until clicked) — sized to
+        // just past the button's own bounds so the rounded-rect ring
+        // (RoundedGlowOutlineSprite) traces the button's actual edge instead
+        // of a shrunk, off-center blob.
         var glowGo = new GameObject("Glow");
         glowGo.transform.SetParent(go.transform, false);
         var glowImg = glowGo.AddComponent<Image>();
@@ -604,8 +430,21 @@ public class NetworkUIManager : MonoBehaviour
         grt.anchorMin        = new Vector2(0.5f, 0.5f);
         grt.anchorMax        = new Vector2(0.5f, 0.5f);
         grt.pivot            = new Vector2(0.5f, 0.5f);
-        grt.anchoredPosition = new Vector2(0, height * 0.12f);
-        grt.sizeDelta        = new Vector2(width * 0.9f, height * 0.75f);
+        grt.anchoredPosition = Vector2.zero;
+        grt.sizeDelta        = new Vector2(width * 1.08f, height * 1.08f);
+
+        // Glow core (tight, hot-white flash layered under/inside the halo
+        // above — see SidebarIconButtonFX.ClickPunchRoutine)
+        var glowCoreGo = new GameObject("GlowCore");
+        glowCoreGo.transform.SetParent(go.transform, false);
+        var glowCoreImg = glowCoreGo.AddComponent<Image>();
+        glowCoreImg.raycastTarget = false;
+        var gcrt = glowCoreGo.GetComponent<RectTransform>();
+        gcrt.anchorMin        = new Vector2(0.5f, 0.5f);
+        gcrt.anchorMax        = new Vector2(0.5f, 0.5f);
+        gcrt.pivot            = new Vector2(0.5f, 0.5f);
+        gcrt.anchoredPosition = new Vector2(0, height * 0.12f);
+        gcrt.sizeDelta        = new Vector2(width * 0.4f, height * 0.35f);
 
         // Missing-art fallback only: a light chrome plate standing in for the
         // real PNG's own baked-in box, so the glyph below doesn't float bare
@@ -638,6 +477,24 @@ public class NetworkUIManager : MonoBehaviour
         irt.offsetMin = Vector2.zero;
         irt.offsetMax = Vector2.zero;
 
+        // Icon glow — a duplicate of the same artwork, additively blended and
+        // flashed on click (see SidebarIconButtonFX.ClickPunchRoutine), so the
+        // PNG itself looks like it's glowing instead of only the halo behind
+        // it. Must be a later sibling than Icon so it draws on top — an
+        // additive layer sitting *behind* an opaque icon would be fully
+        // covered and never show.
+        var iconGlowGo = new GameObject("IconGlow");
+        iconGlowGo.transform.SetParent(go.transform, false);
+        var iconGlowImg = iconGlowGo.AddComponent<Image>();
+        iconGlowImg.sprite = iconSprite;
+        iconGlowImg.preserveAspect = true;
+        iconGlowImg.raycastTarget = false;
+        var iglrt = iconGlowGo.GetComponent<RectTransform>();
+        iglrt.anchorMin = Vector2.zero;
+        iglrt.anchorMax = Vector2.one;
+        iglrt.offsetMin = Vector2.zero;
+        iglrt.offsetMax = Vector2.zero;
+
         // Missing-art fallback only: real icon art bakes its label into the
         // sprite itself (see this method's doc comment) — the placeholder
         // glyph doesn't, so bake one on top here instead, and shrink the
@@ -648,6 +505,7 @@ public class NetworkUIManager : MonoBehaviour
         if (missingArt)
         {
             irt.offsetMin = new Vector2(0f, height * 0.28f);
+            iglrt.offsetMin = irt.offsetMin;
 
             var labelBgGo = new GameObject("LabelBg");
             labelBgGo.transform.SetParent(go.transform, false);
@@ -680,11 +538,13 @@ public class NetworkUIManager : MonoBehaviour
         btn.targetGraphic = iconImg;
 
         var fx = go.AddComponent<SidebarIconButtonFX>();
-        fx.iconImage    = iconImg;
-        fx.glowImage    = glowImg;
-        fx.normalSprite = iconSprite;
-        fx.hoverSprite  = hoverSprite;
-        fx.glowColor    = glowColor;
+        fx.iconImage     = iconImg;
+        fx.iconGlowImage = iconGlowImg;
+        fx.glowImage     = glowImg;
+        fx.glowCoreImage = glowCoreImg;
+        fx.normalSprite  = iconSprite;
+        fx.hoverSprite   = hoverSprite;
+        fx.glowColor     = glowColor;
         fx.Init();
         btn.onClick.AddListener(fx.PlayClickPunch);
 
@@ -696,7 +556,7 @@ public class NetworkUIManager : MonoBehaviour
     // The visible bar/text (the bottom "tips") was removed per request — but
     // statusLabel itself is still built and kept alive, invisible, because
     // Update() below both writes its .text AND drives the sidebar buttons'
-    // forced-active glow (devicesCableFx/pingFx/etc.) behind the same
+    // forced-active glow (devicesGroup/removeGroup/pingFx/etc.) behind the same
     // "if (statusLabel == null) return;" guard. Killing statusLabel entirely
     // would silently disable that glow tracking too, so the bar is hidden via
     // SetActive(false) instead of not being built at all.
@@ -737,7 +597,7 @@ public class NetworkUIManager : MonoBehaviour
     // baked-in label since these read fine as pure glyphs at this size.
 
     const float TopBarButtonWidth = 72f;
-    const float TopBarSpacing     = 14f;
+    const float TopBarSpacing     = 18f; // extra room over the old 14f so SidebarIconButtonFX's hover scale-up doesn't touch neighboring buttons
     const float TopBarMarginTop   = 14f;
 
     void BuildTopBar(Transform canvas)
@@ -845,6 +705,11 @@ public class NetworkUIManager : MonoBehaviour
         DeviceRemoverManager.Instance?.BeginRemoving();
     }
 
+    void OnRemoveTableClicked()
+    {
+        TableRemoverManager.Instance?.BeginRemoving();
+    }
+
     void OnTableClicked()
     {
         TableManager.Instance?.BeginPlacing();
@@ -860,16 +725,25 @@ public class NetworkUIManager : MonoBehaviour
         PacketSendManager.Instance?.BeginSending();
     }
 
+    void LateUpdate()
+    {
+        // After SmoothScrollRect's own LateUpdate (base ScrollRect + its glide
+        // override both run in LateUpdate) so a flyout tracks this frame's
+        // final, post-scroll button position instead of lagging one frame
+        // behind while the sidebar glides from a mouse-wheel scroll.
+        devicesGroup?.LateTick();
+        removeGroup?.LateTick();
+    }
+
     void Update()
     {
-        if (FlyoutOpen) UpdateFlyoutPosition();
-
         if (statusLabel == null) return;
 
         bool dragging        = DragDropManager.Instance      != null && DragDropManager.Instance.IsDragging;
         bool connecting      = CableManager.Instance         != null && CableManager.Instance.IsConnecting;
         bool removingCable   = CableRemoverManager.Instance  != null && CableRemoverManager.Instance.IsRemoving;
         bool removingDevice  = DeviceRemoverManager.Instance != null && DeviceRemoverManager.Instance.IsRemoving;
+        bool removingTable   = TableRemoverManager.Instance  != null && TableRemoverManager.Instance.IsRemoving;
         bool placingTable    = TableManager.Instance         != null && TableManager.Instance.IsPlacing;
         bool draggingTable   = TableManager.Instance         != null && TableManager.Instance.IsDragging;
         bool pinging         = PingToolManager.Instance      != null && PingToolManager.Instance.IsPinging;
@@ -879,16 +753,14 @@ public class NetworkUIManager : MonoBehaviour
         // (same visual language as hover) so the active tool stays obviously highlighted.
         pingFx?.SetForcedActive(pinging);
         sendPacketFx?.SetForcedActive(sendingPacket);
-        removeCableFx?.SetForcedActive(removingCable);
-        removeDeviceFx?.SetForcedActive(removingDevice);
         tableFx?.SetForcedActive(placingTable || draggingTable);
 
-        // Same treatment for the devices/cable compound button — lit up while
-        // either a device ghost (PC/Switch/Router) or Cable mode is active,
-        // whichever the current face happens to be (see SelectCompoundFace —
-        // the face always matches whatever tool was just clicked, so this
-        // never needs to check which one specifically).
-        devicesCableFx?.SetForcedActive(dragging || connecting);
+        // Same treatment for the two compound buttons — lit up while any of
+        // their folded-in tools is active, whichever the current face happens
+        // to be (the face always matches whatever tool was just clicked, so
+        // this never needs to check which one specifically).
+        devicesGroup?.FaceFx?.SetForcedActive(dragging || connecting);
+        removeGroup?.FaceFx?.SetForcedActive(removingCable || removingDevice || removingTable);
 
         if (dragging)
         {
@@ -915,6 +787,8 @@ public class NetworkUIManager : MonoBehaviour
             statusLabel.text = "Remove Cable Mode  —  click a cable to delete it  |  right-click to cancel";
         else if (removingDevice)
             statusLabel.text = "Remove Device Mode  —  click a device to delete it  |  right-click to cancel";
+        else if (removingTable)
+            statusLabel.text = "Remove Table Mode  —  click a table to delete it  |  right-click to cancel";
         else if (placingTable)
             statusLabel.text = "Table Mode  —  click a corner, then the opposite corner  |  right-click to cancel";
         else if (draggingTable)
