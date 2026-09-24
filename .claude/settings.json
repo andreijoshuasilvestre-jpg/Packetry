@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"C:\\Users\\My PC\\AppData\\Roaming\\Python\\Python313\\Scripts\\graphify.exe\" hook-guard search"
+            "command": "\"C:\\Program Files\\Python313\\python.exe\" \"D:\\Game Projects\\CAPSTONE PROJ Main Proto\\.claude\\hooks\\graphify_nudge.py\" search"
           }
         ]
       },
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"C:\\Users\\My PC\\AppData\\Roaming\\Python\\Python313\\Scripts\\graphify.exe\" hook-guard read"
+            "command": "\"C:\\Program Files\\Python313\\python.exe\" \"D:\\Game Projects\\CAPSTONE PROJ Main Proto\\.claude\\hooks\\graphify_nudge.py\" read"
           }
         ]
       }
