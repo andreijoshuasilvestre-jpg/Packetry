@@ -1,5 +1,5 @@
-<p align="center"><img src="packetry-banner.png" alt="Packetry" width="100%"></p>
 # Packetry
+<p align="center"><img src="Logo.png" alt="Packetry" width="100%"></p>
 This game is a capstone project from Pampanga State University from which the proponents are from the course of Bachelor of Science in Information Technology.
 
 Packetry is an educational networking game inspired by Cisco Packet Tracer, but more visual and game-like. You build real working networks out of PCs, switches, and routers, and the game checks whether they actually work: packets only reach their destination if your cabling, IP addresses, and router setup are correct.
