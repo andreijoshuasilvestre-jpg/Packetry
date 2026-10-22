@@ -1,3 +1,4 @@
+<p align="center"><img src="packetry-banner.png" alt="Packetry" width="100%"></p>
 # Packetry
 This game is a capstone project from Pampanga State University from which the proponents are from the course of Bachelor of Science in Information Technology.
 
