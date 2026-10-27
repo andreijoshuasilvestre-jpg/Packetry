@@ -7,8 +7,8 @@ using UnityEngine;
 /// silhouette (body rectangle plus a smaller tab unioned onto its top-left
 /// shoulder) rather than just an outline, since an outline's thin tab corner
 /// is easy to lose entirely at the small on-screen size a packet glyph
-/// renders at. Same runtime-generated, point-filtered, upscaled-blocky
-/// approach as CheckmarkIconBuilder. Used by PacketVisual as the glyph for
+/// renders at. Sampled once per logical cell and upscaled into solid
+/// blocks, same as CheckmarkIconBuilder (see PixelGlyph). Used by PacketVisual as the glyph for
 /// FileTransfer packets in flight.
 /// </summary>
 public static class FolderIconBuilder
@@ -42,14 +42,6 @@ public static class FolderIconBuilder
         var key = new Params(fill, logicalSize, pixelScale);
         if (s_cache.TryGetValue(key, out Sprite cached) && cached != null) return cached;
 
-        int size = logicalSize * pixelScale;
-        var tex = new Texture2D(size, size, TextureFormat.RGBA32, false)
-        {
-            name = "FolderIcon",
-            filterMode = FilterMode.Point,
-            wrapMode = TextureWrapMode.Clamp,
-        };
-
         // Logical-pixel space, y=0 at the bottom: a wide flat body plus a
         // narrower tab sitting on its top-left shoulder.
         float bodyX0 = logicalSize * 0.08f, bodyX1 = logicalSize * 0.92f;
@@ -57,27 +49,14 @@ public static class FolderIconBuilder
         float tabX0  = logicalSize * 0.08f, tabX1  = logicalSize * 0.52f;
         float tabY0  = logicalSize * 0.66f, tabY1  = logicalSize * 0.80f;
 
-        var pixels = new Color32[size * size];
-        var clear = new Color32(0, 0, 0, 0);
-
-        for (int y = 0; y < size; y++)
+        bool[] mask = PixelGlyph.Rasterize(logicalSize, p =>
         {
-            float ly = (y + 0.5f) / pixelScale;
-            for (int x = 0; x < size; x++)
-            {
-                float lx = (x + 0.5f) / pixelScale;
-                bool inBody = lx >= bodyX0 && lx <= bodyX1 && ly >= bodyY0 && ly <= bodyY1;
-                bool inTab  = lx >= tabX0  && lx <= tabX1  && ly >= tabY0  && ly <= tabY1;
-                pixels[y * size + x] = (inBody || inTab) ? fill : clear;
-            }
-        }
+            bool inBody = p.x >= bodyX0 && p.x <= bodyX1 && p.y >= bodyY0 && p.y <= bodyY1;
+            bool inTab  = p.x >= tabX0  && p.x <= tabX1  && p.y >= tabY0  && p.y <= tabY1;
+            return inBody || inTab;
+        });
 
-        tex.SetPixels32(pixels);
-        tex.Apply();
-
-        var sprite = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), 100f * pixelScale);
-        sprite.name = "FolderIcon";
-
+        var sprite = PixelGlyph.ToSprite(PixelGlyph.Flat(mask, fill), logicalSize, pixelScale, "FolderIcon");
         s_cache[key] = sprite;
         return sprite;
     }

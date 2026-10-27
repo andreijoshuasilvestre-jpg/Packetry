@@ -77,3 +77,45 @@ MonoBehaviour:
     icons:
     - Router_Icon
     - Ping
+  - number: 8
+    title: 'Free Build: Office LAN'
+    sceneName: SampleScene
+    category: Challenges
+    description: A blank table and no prescribed layout. Place at least three PCs,
+      wire and address them however you like, and get every PC talking to every other
+      PC.
+    icons:
+    - PC_Icon
+    - Switch_Icon
+  - number: 9
+    title: Multi-Department Network
+    sceneName: SampleScene
+    category: Challenges
+    description: "Scale it up to three departments \u2014 six PCs, three Switches,
+      and a Router using every one of its interfaces. Bigger table, same rules: cable,
+      address, and route between all three subnets yourself."
+    icons:
+    - PC_Icon
+    - Switch_Icon
+    - Router_Icon
+  - number: 10
+    title: Resilience Challenge
+    sceneName: SampleScene
+    category: Challenges
+    description: "Build a network that keeps working no matter which single cable
+      gets cut. A straight chain won't survive \u2014 you'll need real redundancy
+      in the backbone."
+    icons:
+    - Switch_Icon
+    - Cable
+  - number: 11
+    title: 'VLSM: Multi-Site Network'
+    sceneName: SampleScene
+    category: Challenges
+    description: Three departments, one shared address block. Instead of a fresh
+      subnet each, carve 192.168.1.0/24 into three differently-sized pieces that
+      actually fit what each department needs.
+    icons:
+    - Router_Icon
+    - PC_Icon
+    - Switch_Icon

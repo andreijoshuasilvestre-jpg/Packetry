@@ -17,4 +17,5 @@ public class MenuButtonRefs
     public Button Button;
     public MenuButtonFX Fx; // null for a locked card button (see LevelSelectManager.CreateButton) — no hover FX on those
     public RectTransform VisualRect; // the part MenuButtonFX bounce-scales on click
+    public SlidePanel Slide; // null unless the owner wants this button to slide in/out of frame individually (see MainMenuBootstrap's menu-level-select transition)
 }

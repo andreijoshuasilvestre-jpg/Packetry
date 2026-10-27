@@ -27,7 +27,7 @@ public static class ReachabilityService
         public int EntryPort; // meaningful only when Device.deviceType == Router
     }
 
-    public static PingResult Ping(NetworkDevice source, NetworkDevice dest)
+    public static PingResult Ping(NetworkDevice source, NetworkDevice dest, Cable excludeCable = null)
     {
         if (source == null || dest == null)
             return Fail("Invalid device.");
@@ -63,11 +63,11 @@ public static class ReachabilityService
 
             if (node.Device.deviceType == DeviceType.Router)
             {
-                ExpandRouter(node, visited, queue);
+                ExpandRouter(node, visited, queue, excludeCable);
                 continue; // a router's own node never re-expands as a plain device below
             }
 
-            ExpandFlood(node, visited, queue);
+            ExpandFlood(node, visited, queue, excludeCable);
         }
 
         bool physicallyConnected = IsPhysicallyConnected(source, dest);
@@ -78,12 +78,12 @@ public static class ReachabilityService
 
     // Switches (transparent) and PCs (single-port leaves) both just propagate
     // the current segment identity unchanged to whatever's on their other ports.
-    static void ExpandFlood(Node node, HashSet<NetworkDevice> visited, Queue<Node> queue)
+    static void ExpandFlood(Node node, HashSet<NetworkDevice> visited, Queue<Node> queue, Cable excludeCable)
     {
         for (int i = 0; i < node.Device.PortCount; i++)
         {
             Cable cable = node.Device.GetPortCable(i);
-            if (cable == null) continue;
+            if (cable == null || cable == excludeCable) continue;
 
             NetworkDevice neighbor = cable.DeviceA == node.Device ? cable.DeviceB : cable.DeviceA;
             if (neighbor == null || visited.Contains(neighbor)) continue;
@@ -104,7 +104,7 @@ public static class ReachabilityService
     // validated, it auto-forwards out any of its OTHER up/configured interfaces
     // (no route lookup — that's the "own directly-connected interfaces only"
     // scope). Capped to one router in the whole path.
-    static void ExpandRouter(Node node, HashSet<NetworkDevice> visited, Queue<Node> queue)
+    static void ExpandRouter(Node node, HashSet<NetworkDevice> visited, Queue<Node> queue, Cable excludeCable)
     {
         if (node.RouterHops >= 1) return; // second router hop is out of scope (static routing, deferred)
         if (node.EntryPort < 0) return;
@@ -128,7 +128,7 @@ public static class ReachabilityService
             if (!SubnetMath.IsDottedQuad(exitIp) || !SubnetMath.IsDottedQuad(exitMask)) continue;
 
             Cable cable = node.Device.GetPortCable(q);
-            if (cable == null) continue;
+            if (cable == null || cable == excludeCable) continue;
 
             NetworkDevice neighbor = cable.DeviceA == node.Device ? cable.DeviceB : cable.DeviceA;
             if (neighbor == null || visited.Contains(neighbor)) continue;
@@ -142,6 +142,43 @@ public static class ReachabilityService
                 EntryPort = neighbor.GetPortIndexForCable(cable),
             });
         }
+    }
+
+    /// <summary>True if every pair of the given (addressed, wired) PCs can
+    /// currently ping each other. Used by open-ended "any topology" challenge
+    /// levels (see Level8Challenge) that check a network property instead of
+    /// a prescribed shape.</summary>
+    public static bool AllPairsReachable(IReadOnlyList<NetworkDevice> pcs)
+    {
+        if (pcs.Count < 2) return false;
+        for (int i = 0; i < pcs.Count; i++)
+            for (int j = i + 1; j < pcs.Count; j++)
+                if (!Ping(pcs[i], pcs[j]).Success) return false;
+        return true;
+    }
+
+    /// <summary>True if, for every cable in the network, removing just that one
+    /// cable still leaves all PCs it didn't directly disconnect mutually
+    /// reachable. A PC has exactly one port, so its own last-mile cable is
+    /// never redundant by construction — cutting it is expected to drop that
+    /// PC, not fail the check; what this actually verifies is that the
+    /// switch/router backbone itself has no single point of failure. Used by
+    /// Level10Challenge.</summary>
+    public static bool SurvivesAnyCableCut(IReadOnlyList<NetworkDevice> pcs, IReadOnlyList<Cable> cables)
+    {
+        if (cables.Count == 0) return false;
+
+        foreach (Cable cut in cables)
+        {
+            var remaining = new List<NetworkDevice>();
+            foreach (var pc in pcs)
+                if (cut.DeviceA != pc && cut.DeviceB != pc) remaining.Add(pc);
+
+            for (int i = 0; i < remaining.Count; i++)
+                for (int j = i + 1; j < remaining.Count; j++)
+                    if (!Ping(remaining[i], remaining[j], cut).Success) return false;
+        }
+        return true;
     }
 
     // Pure physical-adjacency BFS (ignores subnets/active state entirely) —

@@ -28,8 +28,21 @@ public class InterfacePickerPopup : MonoBehaviour
 
     private GameObject    _panelRoot;
     private RectTransform _panelRt;
+    // Sits between InterfacePicker_Canvas and _panelRoot, carrying a
+    // RectMask2D — Show() animates THIS rect's height open (see
+    // PanelRevealFX), while _panelRoot/_panelRt keep a fixed size/position
+    // inside it, same split CLIPanelManager uses for its own reveal.
+    private GameObject    _panelWrapper;
+    private Canvas        _canvas;
     private Action<int>   _onPicked;
     private int           _shownFrame = -1;
+
+    // Fired as the mouse enters/leaves a clickable row — lets CableManager
+    // preview (as a hologram) the exact cable that port would produce before
+    // the player actually commits to picking it. Not fired for the disabled
+    // "No available interfaces" row (see AddRow's clickable flag).
+    public event Action<int> PortHovered;
+    public event Action      PortUnhovered;
 
     [SerializeField] private Vector2 rowSize      = new Vector2(170, 28);
     [SerializeField] private Color   bgColor       = new Color(0.08f, 0.10f, 0.15f, 0.97f);
@@ -69,6 +82,7 @@ public class InterfacePickerPopup : MonoBehaviour
         // ignore it so we don't immediately dismiss ourselves before the user
         // gets a chance to click a row.
         if (Time.frameCount == _shownFrame) return;
+        if (InteractionMode.IsSuspended) return; // a click on an overlay above us isn't "outside"
 
         // Click outside the popup dismisses it without a pick.
         if (Mouse.current.leftButton.wasPressedThisFrame || Mouse.current.rightButton.wasPressedThisFrame)
@@ -84,6 +98,7 @@ public class InterfacePickerPopup : MonoBehaviour
     public void Show(NetworkDevice device, Vector2 screenPos, Action<int> onPicked)
     {
         _onPicked = onPicked;
+        PortUnhovered?.Invoke(); // reset any hover carried over from a previous popup's rows, about to be destroyed below
 
         // Destroy() is deferred to end-of-frame, so _panelRt.childCount still
         // includes these old rows right after this loop — AddRow below must
@@ -105,17 +120,30 @@ public class InterfacePickerPopup : MonoBehaviour
         }
 
         int rowCount = Mathf.Max(1, free.Count);
-        _panelRt.sizeDelta = new Vector2(rowSize.x, rowSize.y * rowCount);
-        _panelRt.position  = ClampToScreen(screenPos, _panelRt.sizeDelta);
+        float fullHeight = rowSize.y * rowCount;
+        // _panelRt keeps a FIXED size/position from here on — top edge glued to
+        // the wrapper's own top edge (wrapper is left-CENTER pivoted, so its
+        // local +fullHeight/2 is its top) — only the wrapper's height animates.
+        _panelRt.sizeDelta        = new Vector2(rowSize.x, fullHeight);
+        _panelRt.anchoredPosition = new Vector2(0f, fullHeight * 0.5f);
+
+        var wrapperRt = _panelWrapper.GetComponent<RectTransform>();
+        wrapperRt.sizeDelta = new Vector2(rowSize.x, fullHeight);
+        Vector2 topLeft = ClampToScreen(screenPos, wrapperRt.sizeDelta);
+        wrapperRt.position = new Vector3(topLeft.x, topLeft.y - fullHeight * 0.5f, wrapperRt.position.z);
+
         _shownFrame        = Time.frameCount;
         _panelRoot.SetActive(true);
+
+        PanelRevealFX.Play(_panelWrapper, fullHeight, rowHoverColor,
+            _canvas.transform as RectTransform, _canvas.worldCamera);
     }
 
     // Keeps the popup fully on-screen even when opened near a viewport edge,
     // accounting for the canvas's CanvasScaler scale factor.
     Vector2 ClampToScreen(Vector2 screenPos, Vector2 sizeDelta)
     {
-        float scale = _panelRoot.transform.parent.GetComponent<Canvas>().scaleFactor;
+        float scale = _canvas.scaleFactor;
         Vector2 scaledSize = sizeDelta * scale;
 
         float x = Mathf.Clamp(screenPos.x, 0f, Mathf.Max(0f, Screen.width - scaledSize.x));
@@ -125,7 +153,12 @@ public class InterfacePickerPopup : MonoBehaviour
 
     public void Hide()
     {
-        if (_panelRoot != null) _panelRoot.SetActive(false);
+        if (_panelRoot == null || !_panelRoot.activeSelf) { _onPicked = null; return; }
+        PortUnhovered?.Invoke();
+        float fullHeight = _panelRt.sizeDelta.y;
+        PanelRevealFX.PlayClose(_panelWrapper, fullHeight, rowHoverColor,
+            _canvas.transform as RectTransform, _canvas.worldCamera,
+            () => { if (_panelRoot != null) _panelRoot.SetActive(false); });
         _onPicked = null;
     }
 
@@ -159,9 +192,10 @@ public class InterfacePickerPopup : MonoBehaviour
             btn.targetGraphic = img;
             btn.transition    = Selectable.Transition.None; // sprite swap below owns hover visuals
             btn.onClick.AddListener(() => Pick(index));
+            ButtonClickGlow.Attach(rowGo, btn, rowHoverColor);
 
-            AddTrigger(rowGo, EventTriggerType.PointerEnter, _ => img.sprite = _rowHoverSprite);
-            AddTrigger(rowGo, EventTriggerType.PointerExit,  _ => img.sprite = _rowNormalSprite);
+            AddTrigger(rowGo, EventTriggerType.PointerEnter, _ => { img.sprite = _rowHoverSprite; PortHovered?.Invoke(index); });
+            AddTrigger(rowGo, EventTriggerType.PointerExit,  _ => { img.sprite = _rowNormalSprite; PortUnhovered?.Invoke(); });
         }
     }
 
@@ -194,6 +228,18 @@ public class InterfacePickerPopup : MonoBehaviour
         scaler.uiScaleMode         = CanvasScaler.ScaleMode.ScaleWithScreenSize;
         UIScale.Register(scaler);
         canvasGo.AddComponent<GraphicRaycaster>();
+        _canvas = canvas;
+
+        // Reveal wrapper (same VHS/CRT power-on technique as CLIPanelManager,
+        // see PanelRevealFX) — masks the popup so Show() can animate it open
+        // from a thin centered line without resizing/squashing the rows
+        // inside. Left-CENTER pivoted: position.x stays the popup's left edge
+        // (matching the old top-left placement math below) while position.y
+        // is the popup's vertical CENTER, so growing sizeDelta.y expands both
+        // up and down symmetrically instead of only downward.
+        _panelWrapper = MakeRect("Picker_Wrapper", canvasGo.transform);
+        _panelWrapper.AddComponent<RectMask2D>();
+        _panelWrapper.GetComponent<RectTransform>().pivot = new Vector2(0f, 0.5f);
 
         // Outer shell — same bgColor as before, now a chamfered plate (border
         // borrows rowHoverColor, already part of this popup's own palette,
@@ -205,13 +251,23 @@ public class InterfacePickerPopup : MonoBehaviour
         _rowNormalSprite = SmallPlate(rowColor, bgColor);
         _rowHoverSprite  = SmallPlate(rowHoverColor, bgColor);
 
-        _panelRoot = MakeRect("Picker_Panel", canvasGo.transform);
+        _panelRoot = MakeRect("Picker_Panel", _panelWrapper.transform);
+        OccupiesScreen.Add(_panelRoot, OccupantLayer.Panel); // tutorial callout/markers step around it while open
         var panelImg = _panelRoot.AddComponent<Image>();
         panelImg.sprite = _panelSprite;
         panelImg.type   = Image.Type.Sliced;
         _panelRt       = _panelRoot.GetComponent<RectTransform>();
-        _panelRt.anchorMin = new Vector2(0f, 1f);
-        _panelRt.anchorMax = new Vector2(0f, 1f);
+        // Anchored to the WRAPPER's own pivot point (0, 0.5) — the wrapper's
+        // center, which never moves as its height animates open — not (0,1).
+        // Anchoring to a top edge that itself is a MOVING target (the wrapper
+        // grows symmetrically from its center, so a top-anchored child would
+        // be offset by fullHeight/2 from an edge that isn't where Show()'s
+        // math (anchoredPosition = (0, fullHeight/2), fixed once and never
+        // re-anchored) expects it — it was cropping the top half of the popup
+        // out of the mask entirely. pivot stays (0,1): AddRow's own row math
+        // is relative to THIS rect's local space, unaffected.
+        _panelRt.anchorMin = new Vector2(0f, 0.5f);
+        _panelRt.anchorMax = new Vector2(0f, 0.5f);
         _panelRt.pivot     = new Vector2(0f, 1f);
     }
 

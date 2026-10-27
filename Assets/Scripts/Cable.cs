@@ -18,6 +18,18 @@ public class Cable : MonoBehaviour
     public const float GroundClearance = 0.04f; // minimum Y above the ground plane
     public const float TableClearance  = 0.03f; // minimum Y above a tabletop surface it passes over
 
+    // ── Device-body avoidance ────────────────────────────────────────────────
+    // Table/ground clearance above only keeps a cable from sinking through the
+    // floor/tabletop it passes over — it says nothing about a THIRD device's
+    // own body sitting between the cable's two endpoints. AvoidDevices (below)
+    // pushes a sample point fully out of any such device's footprint, picking
+    // whichever escape is cheaper: stepping sideways past the nearest edge, or
+    // lifting straight up above the device's top. Always resolved completely
+    // (not blended by a soft weight) — see AvoidDevices' own doc comment for
+    // why a partial blend can leave a point still inside the box.
+    public const float DeviceClearance         = 0.05f; // gap above a device's top when routing over it
+    public const float DeviceHorizontalMargin  = 0.08f; // gap outside a device's footprint when routing around it
+
     private NetworkDevice _deviceA;
     private NetworkDevice _deviceB;
     private int           _portA;
@@ -31,6 +43,12 @@ public class Cable : MonoBehaviour
     [SerializeField] private Color highlightColor = Color.cyan;
 
     public Color BaseColor { get; private set; }
+
+    // The plain, untinted color this cable started with (CableManager's
+    // cableColor, or a baked cable's own serialized gray) — SetSubnetTint
+    // reverts to this rather than a hardcoded gray so a highlight-colored or
+    // custom-authored cable still has something sane to fall back to.
+    private Color _plainColor;
 
     // ── Construction reveal (see ConstructionRevealEffect) ──────────────────
     // Both default to "fully built" so a normal cable's per-frame Refresh()
@@ -88,6 +106,27 @@ public class Cable : MonoBehaviour
         (_deviceA != null && _deviceA.IsPortActive(_portA)) ||
         (_deviceB != null && _deviceB.IsPortActive(_portB));
 
+    // ── Subnet tint ───────────────────────────────────────────────────────────
+    // Driven by SubnetVisualizer, not polled here — recomputing "what subnet
+    // does this cable's segment belong to" needs a graph walk across the whole
+    // topology (through switches, stopping at routers), which only makes sense
+    // to do once centrally after something relevant actually changes (an
+    // address, a router interface, a cable added/removed) rather than every
+    // cable re-deriving it every frame.
+
+    /// <summary>Overrides this cable's plain color with a subnet's tint (see
+    /// SubnetVisualizer for which subnet a cable shows), or reverts to the
+    /// original color when passed null (nothing at either end has an address).
+    /// Applied immediately — unlike Refresh()'s reveal-time color blend, this
+    /// cable is long past construction by the time a player addresses a device.</summary>
+    public void SetSubnetTint(Color? tint)
+    {
+        BaseColor = tint ?? _plainColor;
+        if (_lr == null) return;
+        _lr.startColor = BaseColor;
+        _lr.endColor   = BaseColor;
+    }
+
     // ── Ping pulse ──────────────────────────────────────────────────────────
     // Temporary override independent of IsCarryingTraffic — used by
     // PingToolManager to flash a result along the exact cables a ping walked,
@@ -114,7 +153,7 @@ public class Cable : MonoBehaviour
     {
         _pulseActive  = true;
         _pulseSuccess = success;
-        yield return new WaitForSeconds(pulseDuration);
+        yield return new WaitForSeconds(AnimationSpeed.Seconds(AnimationKind.Packets, pulseDuration));
         _pulseActive = false;
         // No explicit property-block clear needed — UpdatePackets() sets it
         // fresh (back to the subnet tint) every visible frame regardless.
@@ -140,6 +179,10 @@ public class Cable : MonoBehaviour
     void Awake()
     {
         _lr ??= GetComponent<LineRenderer>();
+        // Captured before Initialize() (fresh cable) or TryRestoreLinks (baked
+        // cable) can override it — either way this read happens first, so it's
+        // always whatever color this cable actually started life with.
+        _plainColor = _lr.startColor;
         if (_deviceA == null || _deviceB == null) TryRestoreLinks();
     }
 
@@ -198,8 +241,9 @@ public class Cable : MonoBehaviour
         _portA     = portA;
         _deviceB   = b;
         _portB     = portB;
-        _swayPhase = Random.Range(0f, Mathf.PI * 2f);
-        BaseColor  = color;
+        _swayPhase  = Random.Range(0f, Mathf.PI * 2f);
+        BaseColor   = color;
+        _plainColor = color;
 
         _lr = GetComponent<LineRenderer>();
         _lr.positionCount    = Segments + 1;
@@ -221,8 +265,22 @@ public class Cable : MonoBehaviour
     void Update()
     {
         if (_deviceA == null || _deviceB == null) { Destroy(gameObject); return; }
+
+        // Nothing drawn yet (LevelBuildInEffect hasn't reached this cable) or
+        // already cleared away (exit sequence) — hide the line and its dots
+        // outright rather than collapsing it to a zero-length stub, whose
+        // round end caps still render as a dot at the origin port.
+        bool hidden = RevealProgress <= 0f;
+        if (_lr.enabled == hidden) _lr.enabled = !hidden;
+
         Refresh();
-        UpdatePackets();
+        UpdatePackets(hidden);
+        if (_hologramActive)
+        {
+            Color tint = hologramTint;
+            tint.a = HologramMaterial.Pulse();
+            HologramMaterial.ApplyTint(_hologramInstance, tint);
+        }
     }
 
     void Refresh()
@@ -273,8 +331,7 @@ public class Cable : MonoBehaviour
                 p += swayDir * (swayOffset * dip / dipRef);       // sway is proportional to local dip
             }
 
-            float minY = Mathf.Max(GroundClearance, Table.ClearanceAt(p) + TableClearance);
-            p.y  = Mathf.Max(p.y, minY);                          // rest on floor / ride over any table, don't clip through
+            p = ApplyClearance(p, _deviceA, _deviceB);
             _lr.SetPosition(i, p);
 
             if (i > 0) _cachedPathLength += Vector3.Distance(prevP, p);
@@ -331,9 +388,9 @@ public class Cable : MonoBehaviour
         }
     }
 
-    void UpdatePackets()
+    void UpdatePackets(bool cableHidden)
     {
-        bool visible = _flowActive || _pulseActive;
+        bool visible = !cableHidden && (_flowActive || _pulseActive);
 
         if (!visible)
         {
@@ -346,7 +403,7 @@ public class Cable : MonoBehaviour
         if (pathLength < 0.0001f) return;
 
         float speedMul = _pulseActive ? pulseSpeedMultiplier : 1f;
-        float step = packetSpeed * speedMul * Time.deltaTime / pathLength;
+        float step = packetSpeed * speedMul * AnimationSpeed.Delta(AnimationKind.Packets) / pathLength;
 
         s_packetPulseBlock ??= new MaterialPropertyBlock();
 
@@ -453,8 +510,11 @@ public class Cable : MonoBehaviour
     /// <summary>
     /// Fills a LineRenderer with the static catenary curve between two points.
     /// Used by CableManager to draw the placement preview with the same shape.
+    /// excludeA/excludeB skip the endpoint device(s) already known at preview
+    /// time (e.g. the source device the player clicked first) so the preview
+    /// doesn't try to route around the very device it's plugged into.
     /// </summary>
-    public static void FillCurvePoints(LineRenderer line, Vector3 a, Vector3 b)
+    public static void FillCurvePoints(LineRenderer line, Vector3 a, Vector3 b, NetworkDevice excludeA = null, NetworkDevice excludeB = null)
     {
         line.positionCount = Segments + 1;
 
@@ -477,10 +537,66 @@ public class Cable : MonoBehaviour
                 p   = a + horizDir * x;
                 p.y = a.y + CatenaryY(cat, x);
             }
-            float minY = Mathf.Max(GroundClearance, Table.ClearanceAt(p) + TableClearance);
-            p.y  = Mathf.Max(p.y, minY);
+            p = ApplyClearance(p, excludeA, excludeB);
             line.SetPosition(i, p);
         }
+    }
+
+    /// <summary>Combines device-body avoidance with the existing ground/tabletop
+    /// floor — shared by Refresh() and FillCurvePoints() so the live cable and
+    /// its placement preview always resolve obstacles identically.</summary>
+    static Vector3 ApplyClearance(Vector3 p, NetworkDevice excludeA, NetworkDevice excludeB)
+    {
+        p = AvoidDevices(p, excludeA, excludeB);
+        float minY = Mathf.Max(GroundClearance, Table.ClearanceAt(p) + TableClearance);
+        p.y = Mathf.Max(p.y, minY);                                // rest on floor / ride over any table, don't clip through
+        return p;
+    }
+
+    /// <summary>Pushes a sample point out of any OTHER device's footprint (the
+    /// cable's own two endpoints are excluded so it can still leave from their
+    /// ports). Picks whichever full escape — step sideways past the nearest
+    /// edge, or lift above the device's top — costs less displacement, and
+    /// applies it completely rather than blending a fraction of each: blending
+    /// between the (still-penetrating) original point and a fully-safe one by
+    /// a soft weight can land back inside the box on every axis at once for
+    /// moderate penetration depths (verified — a point halfway between "push
+    /// past the X edge" and "lift above the top" can still have all three
+    /// axes within range). A full, cost-picked resolution is guaranteed safe;
+    /// it costs the small continuity Table.ClearanceAt's own hard step already
+    /// accepts elsewhere in this file, in exchange for actually working.</summary>
+    static Vector3 AvoidDevices(Vector3 p, NetworkDevice excludeA, NetworkDevice excludeB)
+    {
+        foreach (var d in NetworkDevice.AllDevices)
+        {
+            if (d == null || d.isPaletteItem || d == excludeA || d == excludeB) continue;
+
+            Bounds? fb = d.FootprintBounds();
+            if (fb == null) continue;
+            Bounds b = fb.Value;
+
+            float dx = p.x - b.center.x;
+            float dz = p.z - b.center.z;
+            float halfX = b.extents.x, halfZ = b.extents.z;
+            float penX = halfX - Mathf.Abs(dx);
+            float penZ = halfZ - Mathf.Abs(dz);
+            if (penX <= 0f || penZ <= 0f) continue; // outside this device's footprint
+
+            float sidewaysCost = Mathf.Min(penX, penZ) + DeviceHorizontalMargin;
+            float verticalCost = Mathf.Max(0f, (b.max.y + DeviceClearance) - p.y);
+
+            if (sidewaysCost <= verticalCost)
+            {
+                // Step out past whichever edge is nearer — cheaper than lifting.
+                if (penX <= penZ) p.x = b.center.x + Mathf.Sign(dx == 0f ? 1f : dx) * (halfX + DeviceHorizontalMargin);
+                else               p.z = b.center.z + Mathf.Sign(dz == 0f ? 1f : dz) * (halfZ + DeviceHorizontalMargin);
+            }
+            else
+            {
+                p.y = b.max.y + DeviceClearance;
+            }
+        }
+        return p;
     }
 
     // ── Catenary math ───────────────────────────────────────────────────────
@@ -532,12 +648,60 @@ public class Cable : MonoBehaviour
 
     public NetworkDevice DeviceA => _deviceA;
     public NetworkDevice DeviceB => _deviceB;
+    // Exposed for UndoManager — it needs the exact port pair, captured from
+    // OnCableRemoved, to reconnect the same two interfaces on Undo() rather
+    // than just "some free port on each device."
+    public int PortA => _portA;
+    public int PortB => _portB;
 
     /// <summary>Frees both endpoint ports. Does not destroy this cable's GameObject.</summary>
     public void Disconnect()
     {
         if (_deviceA != null) _deviceA.DisconnectPort(_portA);
         if (_deviceB != null) _deviceB.DisconnectPort(_portB);
+    }
+
+    // ── Port-hover hologram preview ──────────────────────────────────────────
+    // Driven by PortHologramHoverManager: while the mouse hovers a connected
+    // port, that port's cable wears the same grid-lined glowing material as
+    // the drag ghost (see HologramMaterial) instead of inventing a separate
+    // "hovered cable" look — one shared hologram material for the whole game.
+    [Header("Hover Hologram")]
+    [SerializeField] private Color hologramTint = new Color(0.45f, 0.85f, 1f, 0.9f);
+    [SerializeField] private float hologramGridCellSize = 0.35f;
+
+    private Material _preHologramMaterial;
+    private Material _hologramInstance;
+    private bool      _hologramActive;
+
+    /// <summary>Swaps this cable onto (or back off of) the shared hologram material.
+    /// Safe to call every frame with the same value — only acts on a state change.</summary>
+    public void SetHologramPreview(bool on)
+    {
+        if (on == _hologramActive) return;
+        _hologramActive = on;
+
+        if (on)
+        {
+            _preHologramMaterial = _lr.material; // already a per-cable instance (see Initialize) — safe to hold onto directly
+            _hologramInstance = HologramMaterial.CreateInstance(
+                new Vector3(Mathf.Max(_cachedPathLength, 0.5f), 1f, 1f), hologramGridCellSize, true, hologramTint);
+            _lr.material = _hologramInstance;
+            // Vertex colors otherwise multiply into the hologram tint (Particles/Unlit
+            // "Multiply" color mode) — flatten them to white so the hologram reads as
+            // its own clean glow instead of blended with the cable's plain/subnet color.
+            _lr.startColor = Color.white;
+            _lr.endColor   = Color.white;
+        }
+        else
+        {
+            _lr.material   = _preHologramMaterial;
+            _lr.startColor = BaseColor;
+            _lr.endColor   = BaseColor;
+            if (_hologramInstance != null) Destroy(_hologramInstance);
+            _hologramInstance = null;
+            _preHologramMaterial = null;
+        }
     }
 
     static MaterialPropertyBlock s_highlightBlock;

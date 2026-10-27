@@ -42,16 +42,17 @@ public class ConfirmDialogManager : MonoBehaviour
     const float ButtonBottomMargin = 32f;
     const float ButtonGapFromCenter = 130f; // each button's x-offset from panel center
 
-    const float SlideDistance = 300f; // how far below rest position the panel starts each time it opens
-
     TMP_FontAsset font;
     GameObject dimRoot;
     RectTransform panelRt;
-    SlidePanel panelSlide;
+    ZoomPanel panelZoom;
+    PanelArrivalGlow panelGlow;
     TextMeshProUGUI bodyLabel;
     TextMeshProUGUI confirmLabel;
     TextMeshProUGUI cancelLabel;
+    Image confirmImage;
     Action onConfirm;
+    Action onCancel;
 
     void Awake()
     {
@@ -69,24 +70,44 @@ public class ConfirmDialogManager : MonoBehaviour
     // ── Public API ────────────────────────────────────────────────────────────
 
     /// <summary>Shows the modal with message/button text and the action to run if confirmed.
-    /// Cancel (or dismissing) always just closes the modal and runs nothing.</summary>
-    public void Show(string message, string confirmText, Action onConfirmClicked, string cancelText = "Cancel")
+    /// Cancel just closes the modal, running onCancelClicked if given — for a
+    /// question with two real answers (see NarrationManager.ConfirmForLevel)
+    /// rather than an "are you sure?". confirmColor defaults to Danger, the
+    /// destructive-action red.</summary>
+    public void Show(string message, string confirmText, Action onConfirmClicked, string cancelText = "Cancel",
+        Action onCancelClicked = null, Color? confirmColor = null)
     {
         if (bodyLabel == null) return; // BuildPanel hasn't run yet (called before Start)
 
         bodyLabel.text     = message;
         confirmLabel.text  = confirmText;
         cancelLabel.text   = cancelText;
+        confirmImage.color = confirmColor ?? GameTheme.Danger;
         onConfirm          = onConfirmClicked;
+        onCancel           = onCancelClicked;
 
-        // dimRoot must already be active before SlideIn() — it starts a
-        // coroutine on panelSlide, which is a child of dimRoot and can't run
+        // dimRoot must already be active before ZoomIn() — it starts a
+        // coroutine on panelZoom, which is a child of dimRoot and can't run
         // one while disabled.
         dimRoot.SetActive(true);
-        panelSlide.SlideIn();
+        panelZoom.ZoomIn(panelGlow.Play);
     }
 
-    /// <summary>Closes the modal instantly, no slide — used when something else
+    /// <summary>"Quit the game?" prompt — shared by the gameplay top bar's Exit
+    /// button (NetworkUIManager) and the main menu's Quit button.</summary>
+    public void ShowQuitPrompt()
+    {
+        Show("Quit the game?", "Quit", () =>
+        {
+#if UNITY_EDITOR
+            UnityEditor.EditorApplication.isPlaying = false;
+#else
+            Application.Quit();
+#endif
+        });
+    }
+
+    /// <summary>Closes the modal instantly, no zoom — used when something else
     /// (a scene load, Application.Quit) is about to cover the screen anyway, so
     /// an animated close would just get cut off. See OnCancelClicked for the
     /// animated dismiss used when the player actually backs out.</summary>
@@ -94,6 +115,7 @@ public class ConfirmDialogManager : MonoBehaviour
     {
         if (dimRoot != null) dimRoot.SetActive(false);
         onConfirm = null;
+        onCancel  = null;
     }
 
     void OnConfirmClicked()
@@ -105,8 +127,11 @@ public class ConfirmDialogManager : MonoBehaviour
 
     void OnCancelClicked()
     {
+        var callback = onCancel;
         onConfirm = null;
-        panelSlide.SlideOut(() => dimRoot.SetActive(false));
+        onCancel  = null;
+        panelZoom.ZoomOut(() => dimRoot.SetActive(false));
+        callback?.Invoke();
     }
 
     // ── UI construction ──────────────────────────────────────────────────────
@@ -168,17 +193,16 @@ public class ConfirmDialogManager : MonoBehaviour
         MakeButton(panelGo.transform, "CancelButton", new Color(0.30f, 0.32f, 0.38f),
             new Vector2(-ButtonGapFromCenter, ButtonBottomMargin), OnCancelClicked, out cancelLabel);
 
-        MakeButton(panelGo.transform, "ConfirmButton", GameTheme.Danger,
+        confirmImage = MakeButton(panelGo.transform, "ConfirmButton", GameTheme.Danger,
             new Vector2(ButtonGapFromCenter, ButtonBottomMargin), OnConfirmClicked, out confirmLabel);
 
-        // Slides the panel itself (not the dim backdrop, which just snaps
-        // visible/invisible) up into place on open, ease-out — and back down,
-        // ease-in, when the player cancels out (see SlidePanel: SlideIn uses
-        // EaseOutCubic, SlideOut uses EaseInCubic). panelRt's anchoredPosition
-        // is still (0,0) here (never explicitly set), which is exactly the
-        // rest position this should animate to/from.
-        panelSlide = panelGo.AddComponent<SlidePanel>();
-        panelSlide.Configure(SlideEdge.Bottom, SlideDistance);
+        // Zooms the panel itself (not the dim backdrop, which just snaps
+        // visible/invisible) up from nothing on open — same entrance as the
+        // level-select panel (see ZoomPanel) — then plays the button-style
+        // arrival glow once it's full size; zooms back down when the player
+        // cancels out.
+        panelZoom = panelGo.AddComponent<ZoomPanel>();
+        panelGlow = PanelArrivalGlow.Attach(panelGo, GameTheme.ElectricBlue);
     }
 
     TextMeshProUGUI MakeLabel(Transform parent, string name, int fontSize, Vector2 anchoredPos, Vector2 size)
@@ -200,8 +224,8 @@ public class ConfirmDialogManager : MonoBehaviour
         return tmp;
     }
 
-    void MakeButton(Transform parent, string name, Color color, Vector2 anchoredPos,
-                    UnityEngine.Events.UnityAction onClick, out TextMeshProUGUI label)
+    Image MakeButton(Transform parent, string name, Color color, Vector2 anchoredPos,
+                     UnityEngine.Events.UnityAction onClick, out TextMeshProUGUI label)
     {
         var btnGo = new GameObject(name);
         btnGo.transform.SetParent(parent, false);
@@ -231,5 +255,6 @@ public class ConfirmDialogManager : MonoBehaviour
         var btn = btnGo.AddComponent<Button>();
         btn.targetGraphic = btnImg;
         btn.onClick.AddListener(onClick);
+        return btnImg;
     }
 }

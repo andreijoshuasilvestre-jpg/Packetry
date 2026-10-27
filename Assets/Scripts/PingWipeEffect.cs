@@ -16,13 +16,13 @@ using UnityEngine;
 /// physically entering or leaving through, never just the device center — so
 /// the wipe reads as originating from the right side of the model.
 ///
-/// On a PC this is scoped to just the screen part (named "PC_Screen" by both
-/// DeviceModelBuilder and DevicePrefabBuilder — see FindWipeTargets) rather
-/// than the whole chassis, so the detailed green grid reads as "the screen is
-/// showing the ping" instead of the whole tower lighting up; the caller
-/// separately plays PacketDeviceEffect on the whole device alongside this for
-/// the general glow + bounce every touch already gets. Every other device
-/// type (no screen to scope to) still gets the whole-model treatment.
+/// PCs no longer get this at all — their callers play PCMonitor's screen
+/// flash + glyph instead and only fall back to this if a PC somehow has no
+/// monitor. In that fallback it's scoped to just the screen part (named
+/// "PC_Screen" by both DeviceModelBuilder and DevicePrefabBuilder — see
+/// FindWipeTargets) rather than the whole chassis. Routers (a ping's mid-path
+/// forwarding wipe) get the whole-model treatment; the caller separately plays
+/// PacketDeviceEffect alongside this for the general glow + bounce.
 ///
 ///  PlayForward — sweeps outward from origin, 0% covered -> fully covered.
 ///  "the packet has arrived here and its glow is spreading across the
@@ -52,6 +52,25 @@ public class PingWipeEffect : MonoBehaviour
 
     static Shader s_shader;
 
+    // A device can now legitimately have two of these effects overlapping on
+    // the same renderer — e.g. an HttpRequest's arrival wipe on the
+    // destination is still fading out the instant PacketManager.Finish auto-
+    // spawns the HttpResponse, whose own PlayGlowPulse charges up on that same
+    // device (now the response's source). TrySetup used to re-sample
+    // renderers[r].sharedMaterials as "the original" on every call — the
+    // second effect would capture the FIRST effect's own temporary
+    // Custom/PingGlowWipe materials as its "original", and when the first
+    // effect's Restore() ran, it destroyed those same Material instances out
+    // from under the second effect's still-held reference — so that effect's
+    // own eventual Restore() reassigned a destroyed material, which Unity
+    // renders as flat magenta. These two dictionaries make every renderer's
+    // REAL original materials a single fact, captured once by whichever
+    // effect touches that renderer first and shared by every later
+    // overlapping effect, with a ref count so only the last one to finish
+    // actually restores it.
+    static readonly Dictionary<Renderer, Material[]> s_trueOriginals = new();
+    static readonly Dictionary<Renderer, int> s_activeCount = new();
+
     public static void PlayForward(NetworkDevice device, Vector3 origin, Color glowColor, float duration,
         Action onFullyCovered = null, bool quickFade = false)
     {
@@ -66,6 +85,78 @@ public class PingWipeEffect : MonoBehaviour
         if (device == null) { onPeak?.Invoke(); return; }
         var effect = device.gameObject.AddComponent<PingWipeEffect>();
         effect.StartCoroutine(effect.RunGlowPulse(device, origin, glowColor, buildDuration, holdDuration, fadeDuration, onPeak));
+    }
+
+    // ── Sustained arrival glow ───────────────────────────────────────────────
+    // Coalesces a burst of packets landing on the same device in quick
+    // succession into ONE continuous glow — sweep in on the first arrival,
+    // hold fully lit (re-tinting live if a later arrival is a different
+    // packet type) while arrivals keep refreshing it, and only fade out once
+    // SustainGrace passes with nothing new landing — instead of each packet
+    // independently retriggering its own full sweep-in/fade-out (what
+    // PlayForward did before, called once per delivered packet: a burst read
+    // as the screen flashing over and over rather than one steady "actively
+    // receiving" glow). See PacketManager.PlayDeliveryEffects.
+    const float SustainBuildDuration = 0.18f;
+    const float SustainGrace         = 0.35f; // no new arrival within this long => the burst is over
+    const float SustainFadeDuration  = 0.3f;
+
+    static readonly Dictionary<NetworkDevice, PingWipeEffect> s_sustained = new();
+
+    float sustainLastArrival;
+    Color sustainColor;
+
+    /// <summary>Call once per delivered packet. The first call for a device
+    /// starts the glow and fires onPeak once the sweep-in finishes (same
+    /// "materializes right as it's fully covered" beat PlayForward gave every
+    /// packet before); every call after that, while the glow is still active,
+    /// just refreshes its fade-out countdown and re-tints it to this packet's
+    /// color, firing onPeak immediately since the screen is already lit.</summary>
+    public static void NotifyArrival(NetworkDevice device, Vector3 origin, Color glowColor, Action onPeak = null)
+    {
+        if (device == null) { onPeak?.Invoke(); return; }
+
+        if (s_sustained.TryGetValue(device, out var existing) && existing != null)
+        {
+            existing.sustainColor = glowColor;
+            existing.sustainLastArrival = Time.time;
+            onPeak?.Invoke();
+            return;
+        }
+
+        var effect = device.gameObject.AddComponent<PingWipeEffect>();
+        effect.sustainColor = glowColor;
+        effect.sustainLastArrival = Time.time;
+        s_sustained[device] = effect;
+        effect.StartCoroutine(effect.RunSustained(device, origin, onPeak));
+    }
+
+    IEnumerator RunSustained(NetworkDevice device, Vector3 origin, Action onPeak)
+    {
+        if (!TrySetup(device, origin, sustainColor, out Renderer[] renderers, out Material[][] originals, out Material[][] live))
+        {
+            s_sustained.Remove(device);
+            onPeak?.Invoke();
+            Destroy(this);
+            yield break;
+        }
+
+        // Same directional sweep PlayForward uses — still reads as "entering
+        // from the port" for the burst's first packet.
+        yield return AnimateThreshold(live, 0f, FullCoverPoint, SustainBuildDuration, EaseOut);
+        onPeak?.Invoke();
+
+        while (Time.time - sustainLastArrival < AnimationSpeed.Seconds(AnimationKind.Packets, SustainGrace))
+        {
+            SetGlowColor(live, sustainColor * GlowBoost);
+            yield return null;
+        }
+
+        yield return FadeFillTo(live, 1f, 0f, SustainFadeDuration);
+
+        s_sustained.Remove(device);
+        Restore(renderers, originals, live);
+        Destroy(this);
     }
 
     IEnumerator RunForward(NetworkDevice device, Vector3 origin, Color glowColor, float duration, Action onFullyCovered, bool quickFade)
@@ -106,7 +197,7 @@ public class PingWipeEffect : MonoBehaviour
 
         onPeak?.Invoke();
 
-        if (holdDuration > 0f) yield return new WaitForSeconds(holdDuration);
+        if (holdDuration > 0f) yield return new WaitForSeconds(AnimationSpeed.Seconds(AnimationKind.Packets, holdDuration));
 
         yield return FadeFillTo(live, 1f, 0f, fadeDuration);
 
@@ -135,8 +226,16 @@ public class PingWipeEffect : MonoBehaviour
 
         for (int r = 0; r < renderers.Length; r++)
         {
-            Material[] src = renderers[r].sharedMaterials;
-            originals[r] = src;
+            Renderer rend = renderers[r];
+            if (!s_trueOriginals.TryGetValue(rend, out Material[] trueOriginal))
+            {
+                trueOriginal = rend.sharedMaterials;
+                s_trueOriginals[rend] = trueOriginal;
+            }
+            s_activeCount[rend] = s_activeCount.TryGetValue(rend, out int count) ? count + 1 : 1;
+
+            Material[] src = trueOriginal;
+            originals[r] = trueOriginal;
 
             var built = new Material[src.Length];
             for (int i = 0; i < src.Length; i++)
@@ -159,7 +258,7 @@ public class PingWipeEffect : MonoBehaviour
                 built[i] = m;
             }
             live[r] = built;
-            renderers[r].materials = built;
+            rend.materials = built;
         }
         return true;
     }
@@ -212,7 +311,7 @@ public class PingWipeEffect : MonoBehaviour
         float t = 0f;
         while (t < duration)
         {
-            t += Time.deltaTime;
+            t += AnimationSpeed.Delta(AnimationKind.Packets);
             float p = ease(Mathf.Clamp01(t / Mathf.Max(duration, 0.0001f)));
             SetThreshold(live, Mathf.Lerp(from, to, p));
             yield return null;
@@ -225,7 +324,7 @@ public class PingWipeEffect : MonoBehaviour
         float t = 0f;
         while (t < duration)
         {
-            t += Time.deltaTime;
+            t += AnimationSpeed.Delta(AnimationKind.Packets);
             float p = Mathf.Clamp01(t / Mathf.Max(duration, 0.0001f));
             SetFill(live, Mathf.Lerp(from, to, p));
             yield return null;
@@ -247,11 +346,38 @@ public class PingWipeEffect : MonoBehaviour
                 if (m != null) m.SetFloat("_FillStrength", v);
     }
 
+    static void SetGlowColor(Material[][] live, Color boostedColor)
+    {
+        foreach (var arr in live)
+            foreach (var m in arr)
+                if (m != null) m.SetColor("_GlowColor", boostedColor);
+    }
+
     static void Restore(Renderer[] renderers, Material[][] originals, Material[][] live)
     {
         for (int r = 0; r < renderers.Length; r++)
         {
-            if (renderers[r] != null) renderers[r].materials = originals[r];
+            Renderer rend = renderers[r];
+
+            // Only the LAST of any overlapping effects on this renderer
+            // actually restores it and destroys its own materials — an
+            // earlier one finishing while another is still mid-wipe must
+            // leave the renderer showing whichever effect is still live (see
+            // the class-level comment on s_trueOriginals/s_activeCount).
+            int remaining = 0;
+            if (rend != null && s_activeCount.TryGetValue(rend, out int count))
+            {
+                remaining = count - 1;
+                if (remaining <= 0) s_activeCount.Remove(rend);
+                else s_activeCount[rend] = remaining;
+            }
+
+            if (rend != null && remaining <= 0)
+            {
+                rend.materials = originals[r];
+                s_trueOriginals.Remove(rend);
+            }
+
             if (live[r] != null)
                 foreach (var m in live[r])
                     Destroy(m);

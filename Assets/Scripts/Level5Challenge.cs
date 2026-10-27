@@ -18,11 +18,13 @@ using UnityEngine;
 /// guide. Deliberately scoped to a single-subnet LAN (2 PCs + a Switch) so
 /// this first challenge tests independence, not new networking concepts.
 /// </summary>
-public class Level5Challenge : MonoBehaviour
+public class Level5Challenge : MonoBehaviour, IKeepsFinishedBuild
 {
-    readonly List<NetworkDevice> placedPCs = new List<NetworkDevice>();
-    NetworkDevice placedSwitch;
-    bool pingSucceeded;
+    // Live view of what's on the field — see PlacedDeviceTracker.
+    readonly PlacedDeviceTracker placed = new PlacedDeviceTracker();
+    IReadOnlyList<NetworkDevice> placedPCs => placed.PCs;
+    NetworkDevice placedSwitch => placed.FirstSwitch;
+    readonly PacketCoverageTracker packetCoverage = new PacketCoverageTracker();
     bool completionHandled;
 
     void Start()
@@ -36,24 +38,17 @@ public class Level5Challenge : MonoBehaviour
     IEnumerator InitNextFrame()
     {
         yield return null;
+        while (!GameBootstrap.IntroSequenceReady) yield return null;
 
         // Seed with whatever devices already exist when this level starts —
         // a restored save (TopologyLoader, built in Awake, earlier than this
         // Start) counts toward objectives the same as anything placed fresh.
-        foreach (var device in Object.FindObjectsByType<NetworkDevice>(FindObjectsInactive.Exclude))
-        {
-            if (device.deviceType == DeviceType.PC) placedPCs.Add(device);
-            else if (device.deviceType == DeviceType.Switch && placedSwitch == null) placedSwitch = device;
-        }
-
-        if (DragDropManager.Instance != null) DragDropManager.Instance.OnDeviceDropped += HandleDeviceDropped;
-        if (PingToolManager.Instance != null) PingToolManager.Instance.OnPingCompleted += HandlePingCompleted;
+        placed.Attach();
+        packetCoverage.Attach();
 
         var tm = TaskManager.Instance;
         if (tm != null)
         {
-            tm.OnTasksChanged += HandleTasksChanged;
-
             tm.RegisterTask("Place two PCs and a Switch", () => placedPCs.Count >= 2 && placedSwitch != null,
                 hintNudge: "Drag devices in from the sidebar on the left.",
                 hintSpecific: "You need exactly 2 PCs and 1 Switch on the table.",
@@ -66,31 +61,24 @@ public class Level5Challenge : MonoBehaviour
                 hintNudge: "Same subnet means matching network address — check both masks match too.",
                 hintSpecific: "Try 192.168.1.x for both PCs, with mask 255.255.255.0.",
                 hintAnswer: "e.g. 192.168.1.10 / 255.255.255.0 and 192.168.1.20 / 255.255.255.0.");
-            tm.RegisterTask("Successfully ping between the two PCs", () => pingSucceeded,
-                hintNudge: "Use the Ping tool from the sidebar, then pick your two PCs.",
-                hintSpecific: "If it fails, double check both PCs actually show the same subnet color tint.",
-                hintAnswer: "Click Ping, click the first PC, then the second PC.");
+            packetCoverage.RegisterTask(tm, placedPCs);
+
+            // Subscribed only once every task is in — a resumed save's tasks
+            // register already complete one at a time, and the first alone
+            // would otherwise read as the whole level done. A restored
+            // finished build (see IKeepsFinishedBuild) arrives fully complete:
+            // its completion and stars were recorded the first time round,
+            // so the Level Complete panel isn't replayed.
+            completionHandled = tm.Tasks.All(t => t.IsComplete);
+            tm.OnTasksChanged += HandleTasksChanged;
         }
     }
 
     void OnDestroy()
     {
-        if (DragDropManager.Instance != null) DragDropManager.Instance.OnDeviceDropped -= HandleDeviceDropped;
-        if (PingToolManager.Instance != null) PingToolManager.Instance.OnPingCompleted -= HandlePingCompleted;
+        placed.Detach();
+        packetCoverage.Detach();
         if (TaskManager.Instance != null) TaskManager.Instance.OnTasksChanged -= HandleTasksChanged;
-    }
-
-    void HandleDeviceDropped(NetworkDevice device, bool isNewDevice)
-    {
-        if (!isNewDevice) return;
-
-        if (device.deviceType == DeviceType.PC) placedPCs.Add(device);
-        else if (device.deviceType == DeviceType.Switch && placedSwitch == null) placedSwitch = device;
-    }
-
-    void HandlePingCompleted(NetworkDevice source, NetworkDevice dest, ReachabilityService.PingResult result)
-    {
-        if (result.Success && placedPCs.Contains(source) && placedPCs.Contains(dest)) pingSucceeded = true;
     }
 
     bool BothPcsCabled()
@@ -153,8 +141,7 @@ public class Level5Challenge : MonoBehaviour
             "Back to Level Select",
             () =>
             {
-                MainMenuBootstrap.OpenLevelSelectOnLoad = true;
-                LoadingScreenManager.LoadScene("MainMenu", "LOADING LEVEL SELECT");
+                LoadingScreenManager.ExitToLevelSelect();
             },
             stars);
     }

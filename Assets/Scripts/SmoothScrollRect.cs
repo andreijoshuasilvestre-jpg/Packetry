@@ -25,6 +25,42 @@ public class SmoothScrollRect : ScrollRect
     // fighting (and effectively cancelling) every wheel step.
     public bool IsGliding => gliding;
 
+    // Viewport scale (relative to its root canvas) below which the list
+    // counts as collapsed — see IsCollapsed.
+    const float CollapsedScale = 0.02f;
+    Canvas rootCanvas;
+
+    /// <summary>True while a parent is scaled down to almost nothing — a
+    /// ZoomPanel zoom-in/out passes through scale 0. ScrollRect's bounds math
+    /// maps content's world corners back into viewport space, which loses all
+    /// precision near scale 0, and its Clamped correction then flings the
+    /// content far past either end of the list (seen as Level Select
+    /// reopening scrolled to the very bottom). LateUpdate sits those frames
+    /// out; LevelCarousel reads this too.</summary>
+    public bool IsCollapsed
+    {
+        get
+        {
+            if (viewport == null) return false;
+            if (rootCanvas == null)
+            {
+                var canvas = GetComponentInParent<Canvas>();
+                if (canvas != null) rootCanvas = canvas.rootCanvas;
+            }
+            float reference = rootCanvas != null ? rootCanvas.transform.lossyScale.y : 1f;
+            return Mathf.Abs(viewport.lossyScale.y) < CollapsedScale * reference;
+        }
+    }
+
+    /// <summary>Drops any in-progress wheel glide — for callers that set the
+    /// content position directly (LevelCarousel.CenterOn), so the glide
+    /// doesn't drag it back toward its old target.</summary>
+    public void CancelGlide()
+    {
+        gliding      = false;
+        dampVelocity = Vector2.zero;
+    }
+
     public override void OnScroll(PointerEventData data)
     {
         if (!IsActive() || content == null || viewport == null) return;
@@ -80,6 +116,7 @@ public class SmoothScrollRect : ScrollRect
 
     protected override void LateUpdate()
     {
+        if (IsCollapsed) return;
         base.LateUpdate();
         if (!gliding) return;
 

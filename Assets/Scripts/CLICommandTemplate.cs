@@ -52,6 +52,24 @@ public static class CLICommandTemplate
         return segments;
     }
 
+    /// <summary>True once a parameter field holds a finished value of its kind,
+    /// not just a start on one — a whole dotted-quad address for &lt;ip&gt;, a legal
+    /// mask for &lt;mask&gt; (see SubnetMath.ClassifyMaskInput), a port number for
+    /// &lt;N&gt;, anything at all for any other parameter. Lets a guide wait for the
+    /// player to finish typing "192.168.1.1" before pointing at the next field,
+    /// instead of moving on at the first keystroke.</summary>
+    public static bool IsParamComplete(string param, string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        switch (param)
+        {
+            case "ip":   return SubnetMath.IsDottedQuad(value);
+            case "mask": return SubnetMath.ClassifyMaskInput(value) == SubnetMath.MaskInputState.Valid;
+            case "N":    return int.TryParse(value, out _);
+            default:     return true;
+        }
+    }
+
     public static string Compose(List<Segment> segments, Dictionary<string, TMP_InputField> paramFields)
     {
         var sb = new StringBuilder();

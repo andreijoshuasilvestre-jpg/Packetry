@@ -40,8 +40,20 @@ public class SaveData
 [Serializable]
 public class SettingsData
 {
-    public float musicVolume = 0.8f;
-    public float sfxVolume   = 0.8f;
+    // What a first-time player (no save.json yet) starts at for both music and
+    // sound effects — half volume, so the game never opens loud before the
+    // player has had a chance to find the Settings sliders. Existing saves
+    // already carry their own values, so changing this never touches them.
+    public const float DefaultVolume = 0.5f;
+
+    public float musicVolume = DefaultVolume;
+    public float sfxVolume   = DefaultVolume;
+
+    // Annotations read aloud (see NarrationManager). On by default — each
+    // narrated level opens by asking whether to keep it. The voice has its own
+    // volume, separate from sfxVolume, and starts at full so it carries over music.
+    public bool narrationEnabled = true;
+    public float narrationVolume = 1f;
 
     // Multiplier applied on top of every UI canvas's existing CanvasScaler
     // resolution scaling (see UIScale) — an accessibility-style "make
@@ -55,6 +67,21 @@ public class SettingsData
     // generated default color for that slot index.
     public int subnetColorSlotCount = 5;
     public List<SubnetColorOverride> subnetColorOverrides = new List<SubnetColorOverride>();
+
+    // Camera (see IsometricCamera). cameraZoomDistance <= 0 means "never set" —
+    // IsometricCamera falls back to its own scripted startDistance so a fresh
+    // save still gets the intro zoom-out. The two multipliers scale
+    // IsometricCamera's own base zoom/keyboard-pan speeds, 1 = unchanged.
+    public float cameraZoomDistance = -1f;
+    public float cameraZoomSpeedMultiplier = 1f;
+    public float cameraPanSpeedMultiplier = 1f;
+
+    // Animation speed multipliers, 1x-3x (see AnimationSpeed) — one each for
+    // packets, the player's own placements, and a level's entrance/exit.
+    // 1 = every animation's own authored pace.
+    public float packetAnimationSpeed = 1f;
+    public float buildAnimationSpeed  = 1f;
+    public float levelAnimationSpeed  = 1f;
 }
 
 /// <summary>One player-recolored palette slot — absent entries just mean
@@ -73,7 +100,7 @@ public class LevelProgress
     public int levelId;
     public bool completionStatus;
     public int score; // reserved — nothing computes a score yet, kept for schema fidelity
-    public int starsEarned; // 1-3, from TaskManager.ComputeStars() at completion time; 0 = not yet completed
+    public int starsEarned; // 1-3, best TaskManager.ComputeStars() rating across completions (see SaveManager.SetStars); 0 = not yet completed
     public List<TaskStatus> tasks = new List<TaskStatus>();
     public TopologySave topology = new TopologySave();
 }
@@ -124,6 +151,7 @@ public class DeviceSave
     public float rotY;        // yaw — not in the ERD, needed to restore rotated devices
     public string ipAddress;
     public string ipMask;
+    public long addressedAtTicks; // DeviceAddress.AddressedAtTicks — no longer decides Switch colors (see SubnetVisualizer), kept so saves round-trip unchanged
     public bool[] portActive; // per-port up/down state — not in the ERD, drives Cable's packet-flow cosmetic
 
     // Router-only: per-interface IP/mask/shutdown, mirroring RouterInterfaceConfig
@@ -141,6 +169,7 @@ public class InterfaceConfigSave
     public string ip = "";
     public string mask = "";
     public bool shutdown = true;
+    public long addressedAtTicks; // RouterInterfaceConfig.PortConfig.addressedAtTicks
 }
 
 /// <summary>Cable.</summary>

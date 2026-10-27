@@ -1,5 +1,3 @@
-using System.Collections;
-using System.Linq;
 using UnityEngine;
 
 /// <summary>
@@ -17,24 +15,9 @@ public class TopologyLoader : MonoBehaviour
         var progress = SaveManager.GetOrCreate(level);
         SceneStateCapture.Restore(progress.topology);
 
-        StartCoroutine(ApplySavedTaskStateNextFrame(progress));
-    }
-
-    // TaskManager tasks are registered by that level's own *Objectives
-    // component in ITS Start() — deferring one frame guarantees registration
-    // has already happened, regardless of Start() call order between sibling
-    // components created in the same GameBootstrap.Awake() pass.
-    IEnumerator ApplySavedTaskStateNextFrame(LevelProgress progress)
-    {
-        yield return null;
-
-        if (TaskManager.Instance == null) yield break;
-
-        foreach (var saved in progress.tasks)
-        {
-            if (!saved.status) continue;
-            var task = TaskManager.Instance.Tasks.FirstOrDefault(t => t.Description == saved.description);
-            if (task != null) task.IsComplete = true;
-        }
+        // Handed over now, applied later — the level's objectives register
+        // their tasks a frame or more after this, and TaskManager marks each
+        // one complete as it registers if the save had it complete.
+        TaskManager.Instance?.RestoreCompleted(progress.tasks);
     }
 }

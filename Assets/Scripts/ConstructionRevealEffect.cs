@@ -19,7 +19,8 @@ using UnityEngine;
 ///      with the material actually solidifying rather than happening after.
 /// A burst of sparks marks the moment the object is fully built. Original
 /// materials are restored once phase 2 completes — this is a spawn-in effect,
-/// not a permanent shader.
+/// not a permanent shader. Every phase follows the Build animation speed
+/// setting (see AnimationSpeed).
 /// </summary>
 public class ConstructionRevealEffect : MonoBehaviour
 {
@@ -166,7 +167,7 @@ public class ConstructionRevealEffect : MonoBehaviour
         // Hold the fully-built blueprint for a beat so it actually reads as a
         // distinct stage before it starts solidifying.
         if (holdDuration > 0f)
-            yield return new WaitForSeconds(holdDuration);
+            yield return new WaitForSeconds(AnimationSpeed.Seconds(AnimationKind.Build, holdDuration));
 
         // Phase 3 (final) — solid front sweeps out from the same corner again
         // (threshold 1 -> maxThreshold), converting the blueprint into the
@@ -228,7 +229,7 @@ public class ConstructionRevealEffect : MonoBehaviour
         float t = 0f;
         while (t < blueprintPhaseDuration)
         {
-            t += Time.deltaTime;
+            t += AnimationSpeed.Delta(AnimationKind.Build);
             cable.RevealProgress = EaseOut(Mathf.Clamp01(t / blueprintPhaseDuration));
             ConstructionSparks.UpdateAsPoint(sparks, cable.GetRevealTipPoint());
             yield return null;
@@ -238,12 +239,12 @@ public class ConstructionRevealEffect : MonoBehaviour
         ConstructionSparks.StopAndDestroy(sparks);
 
         if (holdDuration > 0f)
-            yield return new WaitForSeconds(holdDuration);
+            yield return new WaitForSeconds(AnimationSpeed.Seconds(AnimationKind.Build, holdDuration));
 
         t = 0f;
         while (t < solidPhaseDuration)
         {
-            t += Time.deltaTime;
+            t += AnimationSpeed.Delta(AnimationKind.Build);
             cable.SolidifyProgress = EaseOut(Mathf.Clamp01(t / solidPhaseDuration));
             yield return null;
         }
@@ -294,7 +295,7 @@ public class ConstructionRevealEffect : MonoBehaviour
         float t = 0f;
         while (t < duration)
         {
-            t += Time.deltaTime;
+            t += AnimationSpeed.Delta(AnimationKind.Build);
             float p = EaseOut(Mathf.Clamp01(t / duration));
             float threshold = Mathf.Lerp(from, to, p);
             for (int r = 0; r < reveal.Length; r++)

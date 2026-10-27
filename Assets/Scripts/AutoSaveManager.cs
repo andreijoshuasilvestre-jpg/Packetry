@@ -31,7 +31,11 @@ public class AutoSaveManager : MonoBehaviour
             CableManager.Instance.OnCableCreated += HandleCableChanged;
             CableManager.Instance.OnCableRemoved += HandleCableChanged;
         }
-        if (TableManager.Instance != null) TableManager.Instance.OnTablePlaced += HandleTableChanged;
+        if (TableManager.Instance != null)
+        {
+            TableManager.Instance.OnTablePlaced  += HandleTableChanged;
+            TableManager.Instance.OnTableResized += HandleTableResized;
+        }
         if (TaskManager.Instance != null) TaskManager.Instance.OnTasksChanged += HandleTasksChanged;
         if (DeviceRemoverManager.Instance != null) DeviceRemoverManager.Instance.OnDeviceRemoved += HandleDeviceRemoved;
         if (TableRemoverManager.Instance != null) TableRemoverManager.Instance.OnTableRemoved += HandleTableRemoved;
@@ -49,7 +53,11 @@ public class AutoSaveManager : MonoBehaviour
             CableManager.Instance.OnCableCreated -= HandleCableChanged;
             CableManager.Instance.OnCableRemoved -= HandleCableChanged;
         }
-        if (TableManager.Instance != null) TableManager.Instance.OnTablePlaced -= HandleTableChanged;
+        if (TableManager.Instance != null)
+        {
+            TableManager.Instance.OnTablePlaced  -= HandleTableChanged;
+            TableManager.Instance.OnTableResized -= HandleTableResized;
+        }
         if (TaskManager.Instance != null) TaskManager.Instance.OnTasksChanged -= HandleTasksChanged;
         if (DeviceRemoverManager.Instance != null) DeviceRemoverManager.Instance.OnDeviceRemoved -= HandleDeviceRemoved;
         if (TableRemoverManager.Instance != null) TableRemoverManager.Instance.OnTableRemoved -= HandleTableRemoved;
@@ -59,6 +67,7 @@ public class AutoSaveManager : MonoBehaviour
     void HandleDeviceDropped(NetworkDevice device, bool isNewDevice) => SaveNow();
     void HandleCableChanged(Cable cable) => SaveNow();
     void HandleTableChanged(Table table) => SaveNow();
+    void HandleTableResized(Table table, Vector3 oldCenter, float oldWidth, float oldLength) => SaveNow();
     void HandleTasksChanged() => SaveNow();
     void HandleDeviceRemoved(NetworkDevice device) => SaveNow();
     void HandleTableRemoved(Table table) => SaveNow();
@@ -71,6 +80,9 @@ public class AutoSaveManager : MonoBehaviour
     public void SaveNow()
     {
         if (LevelManager.Instance == null) return;
+        // The level is tearing down (see GameBootstrap.ExitStarted) — a panel
+        // closing on the way out mustn't re-save over a restart's cleared progress.
+        if (GameBootstrap.ExitStarted) return;
         int level = LevelManager.Instance.CurrentLevel;
 
         SaveManager.SaveTopologySnapshot(level, SceneStateCapture.Capture());

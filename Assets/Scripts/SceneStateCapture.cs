@@ -57,7 +57,8 @@ public static class SceneStateCapture
                             port = i,
                             ip = pc.ip ?? "",
                             mask = pc.mask ?? "",
-                            shutdown = pc.shutdown
+                            shutdown = pc.shutdown,
+                            addressedAtTicks = pc.addressedAtTicks
                         });
                     }
             }
@@ -74,6 +75,7 @@ public static class SceneStateCapture
                 rotY = device.transform.eulerAngles.y,
                 ipAddress = hasAddress ? addr.Ip : "",
                 ipMask = hasAddress ? addr.Mask : "",
+                addressedAtTicks = hasAddress ? addr.AddressedAtTicks : 0,
                 portActive = portActive,
                 interfaces = interfaces
             });
@@ -112,7 +114,7 @@ public static class SceneStateCapture
         {
             subnetId = subnetId,
             subnetName = $"{subnetId}/{SubnetMath.MaskToPrefixLength(mask)}",
-            subnetColorHex = ColorUtility.ToHtmlStringRGB(GameTheme.SubnetTint(net)),
+            subnetColorHex = ColorUtility.ToHtmlStringRGB(GameTheme.SubnetTint(SubnetMath.SubnetOf(ip, mask))),
             gatewayAddress = "" // no "designated gateway" concept exists in-game yet
         });
     }
@@ -158,7 +160,7 @@ public static class SceneStateCapture
             if (SubnetMath.IsDottedQuad(d.ipAddress) && SubnetMath.IsDottedQuad(d.ipMask))
             {
                 var restoredAddr = go.AddComponent<DeviceAddress>();
-                restoredAddr.SetAddress(d.ipAddress, d.ipMask);
+                restoredAddr.SetAddress(d.ipAddress, d.ipMask, d.addressedAtTicks);
             }
 
             if (d.portActive != null)
@@ -177,6 +179,7 @@ public static class SceneStateCapture
                     pc.ip       = ic.ip ?? "";
                     pc.mask     = ic.mask ?? "";
                     pc.shutdown = ic.shutdown;
+                    pc.addressedAtTicks = ic.addressedAtTicks;
                 }
             }
 
@@ -189,7 +192,7 @@ public static class SceneStateCapture
             {
                 if (!devicesById.TryGetValue(c.sourceDeviceId, out var a)) continue;
                 if (!devicesById.TryGetValue(c.targetDeviceId, out var b)) continue;
-                CableManager.Instance.CreateCable(a, c.sourcePort, b, c.targetPort);
+                CableManager.Instance.CreatePrebuiltCable(a, c.sourcePort, b, c.targetPort);
             }
         }
     }

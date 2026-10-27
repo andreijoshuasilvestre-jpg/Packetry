@@ -36,8 +36,8 @@ public class Level2SceneSetup : MonoBehaviour
         if (CableManager.Instance != null)
         {
             var freePorts = sw.GetFreePorts();
-            CableManager.Instance.CreateCable(pc1, 0, sw, freePorts[0]);
-            CableManager.Instance.CreateCable(pc2, 0, sw, freePorts[1]);
+            CableManager.Instance.CreatePrebuiltCable(pc1, 0, sw, freePorts[0]);
+            CableManager.Instance.CreatePrebuiltCable(pc2, 0, sw, freePorts[1]);
         }
 
         // First snapshot so a player who quits before triggering any other

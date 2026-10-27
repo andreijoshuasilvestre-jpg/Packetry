@@ -12,6 +12,10 @@ using UnityEngine.UI;
 /// the background and the label together, rather than a single baked icon
 /// sprite, since the menu buttons compose art + TextMeshPro text separately.
 ///
+/// While hovered, the plate eases up to hoverScale (and back down to 1 on
+/// exit) — a lighter, continuous cousin of the click bounce below, not a
+/// pop, so it doesn't fight visually with the sharper click-time animation.
+///
 /// On click the plate does a single subtle bounce-scale pop (no tilt), a
 /// soft glow pulse behind it, and a short burst of blue UI sparks — the same
 /// "electric construction" language ConstructionSparks/ConstructionRevealEffect
@@ -36,10 +40,36 @@ public class MenuButtonFX : MonoBehaviour, IPointerEnterHandler, IPointerExitHan
     public Sprite hoverSprite;
     public Color glowColor = Color.white;
 
+    // Optional — set by a builder that wants this button to start invisible
+    // and be revealed later via PlayRevealIn() (see MainMenuShellBuilder's
+    // main-menu buttons) instead of being visible from the first frame.
+    // Left null by builders that don't use that entrance (LevelSelect's
+    // cards/static buttons), which is a harmless no-op for PlayRevealIn.
+    public CanvasGroup revealGroup;
+
+    [Tooltip("localScale visualRect eases to while the pointer is over the button.")]
+    public float hoverScale = 1.06f;
+    const float HoverScaleDuration = 0.12f;
+
+    // Opt-in continuous "breathing" pulse for buttons that should draw a
+    // little idle attention (see LevelSelectManager's level cards) without
+    // it fighting the hover/click scale routines below — Update() only ever
+    // writes visualRect.localScale from this when neither of those currently
+    // owns it (see the guard in Update()), and the amplitude is deliberately
+    // tiny: this rect is also the raycast target's own transform (Background
+    // lives under it), so a bigger pulse would visibly nudge the clickable
+    // area around instead of just reading as gentle life in the card.
+    public bool idlePulse = false;
+    const float IdlePulseAmplitude = 0.018f;
+    const float IdlePulseSpeed     = 1.6f; // radians/sec — ~4s full cycle
+    float idlePulsePhase;
+
     RectTransform sparkParent;
     Camera eventCamera;
 
     Coroutine clickRoutine;
+    Coroutine hoverScaleRoutine;
+    Coroutine revealRoutine;
     bool hovering;
 
     /// <summary>Call once after assigning all fields.</summary>
@@ -63,25 +93,99 @@ public class MenuButtonFX : MonoBehaviour, IPointerEnterHandler, IPointerExitHan
             eventCamera = canvas.worldCamera;
         }
 
+        // Random per-button phase so a row of idle-pulsing cards breathes
+        // out of sync with each other instead of all pulsing in lockstep.
+        idlePulsePhase = UnityEngine.Random.Range(0f, Mathf.PI * 2f);
+
         RefreshSprite();
+    }
+
+    // Only ever runs the pulse math while nothing else owns visualRect's
+    // scale — hover-enter/exit, the click bounce and the reveal all drive it
+    // directly (see SetHoverScaleTarget/ClickRoutine/PlayRevealIn) and take
+    // priority; this simply stays quiet until they're done, so it can't
+    // stutter or fight them.
+    void Update()
+    {
+        if (!idlePulse || visualRect == null) return;
+        if (hovering || clickRoutine != null || hoverScaleRoutine != null || revealRoutine != null) return;
+
+        float pulse = 1f + Mathf.Sin(Time.unscaledTime * IdlePulseSpeed + idlePulsePhase) * IdlePulseAmplitude;
+        visualRect.localScale = Vector3.one * pulse;
+    }
+
+    /// <summary>
+    /// Plays this button's first-appearance reveal — pops in from
+    /// revealGroup's alpha 0 with the same glow-pulse-and-spark language as
+    /// the click flash (see MenuRevealFlash) — instead of the button just
+    /// being visible from frame one. Call once per menu appearance, after
+    /// Init(); a no-op fade if revealGroup was never assigned. Also how
+    /// LevelSelectManager transforms a freshly unlocked level card from its
+    /// old locked look into a live one (see LevelSelectManager.PlayUnlock).
+    /// </summary>
+    public void PlayRevealIn()
+    {
+        if (revealGroup != null) revealGroup.alpha = 0f;
+        if (visualRect != null) visualRect.localScale = Vector3.one * MenuRevealFlash.StartScale;
+        if (revealRoutine != null) StopCoroutine(revealRoutine);
+        revealRoutine = StartCoroutine(RevealRoutine());
+    }
+
+    IEnumerator RevealRoutine()
+    {
+        yield return MenuRevealFlash.Play(revealGroup, visualRect, glowImage, glowColor, visualRect, sparkParent, eventCamera);
+        revealRoutine = null;
+        // A hover that began mid-reveal was deferred (see SetHoverScaleTarget)
+        // — pick it up now that the reveal has let go of the scale.
+        if (hovering) SetHoverScaleTarget(hoverScale);
     }
 
     public void OnPointerEnter(PointerEventData eventData)
     {
         hovering = true;
         RefreshSprite();
+        SetHoverScaleTarget(hoverScale);
     }
 
     public void OnPointerExit(PointerEventData eventData)
     {
         hovering = false;
         RefreshSprite();
+        SetHoverScaleTarget(1f);
     }
 
     void RefreshSprite()
     {
         if (backgroundImage == null) return;
         backgroundImage.sprite = (hovering && hoverSprite != null) ? hoverSprite : normalSprite;
+    }
+
+    // Click's bounce pop (ClickRoutine) and the first-appearance reveal
+    // (PlayRevealIn/MenuRevealFlash) both drive visualRect.localScale too —
+    // deferring to them here (rather than fighting over the same
+    // transform) means a hover right as either plays just resumes once
+    // they're done, via the hovering-aware scale ClickRoutine settles to
+    // and the natural pointer-enter/exit events either leaves behind.
+    void SetHoverScaleTarget(float target)
+    {
+        if (clickRoutine != null || revealRoutine != null || visualRect == null) return;
+        if (hoverScaleRoutine != null) StopCoroutine(hoverScaleRoutine);
+        hoverScaleRoutine = StartCoroutine(HoverScaleRoutine(target));
+    }
+
+    IEnumerator HoverScaleRoutine(float target)
+    {
+        float start = visualRect.localScale.x;
+        float t = 0f;
+        while (t < HoverScaleDuration)
+        {
+            t += Time.unscaledDeltaTime;
+            float scale = Mathf.Lerp(start, target, Mathf.Clamp01(t / HoverScaleDuration));
+            visualRect.localScale = Vector3.one * scale;
+            yield return null;
+        }
+        visualRect.localScale = Vector3.one * target;
+        hoverScaleRoutine = null;
     }
 
     /// <summary>
@@ -99,7 +203,7 @@ public class MenuButtonFX : MonoBehaviour, IPointerEnterHandler, IPointerExitHan
 
     IEnumerator ClickRoutine(Action onComplete)
     {
-        const float duration  = 0.22f;
+        const float duration  = 0.12f; // shortened from 0.22f — trims the delay before onComplete actually fires (see PlayClickThen)
         const float peakScale = 1.12f;
         const float glowPeak  = 0.6f;
         const float glowScale = 1.3f;
@@ -136,7 +240,7 @@ public class MenuButtonFX : MonoBehaviour, IPointerEnterHandler, IPointerExitHan
         }
 
         if (visualRect != null)
-            visualRect.localScale = Vector3.one;
+            visualRect.localScale = Vector3.one * (hovering ? hoverScale : 1f);
         if (glowImage != null)
         {
             glowImage.color = new Color(glowColor.r, glowColor.g, glowColor.b, 0f);

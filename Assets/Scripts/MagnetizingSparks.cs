@@ -99,6 +99,9 @@ public class MagnetizingSparks : MonoBehaviour
         main.simulationSpace = ParticleSystemSimulationSpace.World;
         main.loop = true;
         main.playOnAwake = false;
+        // The swarm chases a ping, so it runs at the Packets animation speed
+        // too — otherwise a sped-up orb leaves its sparks trailing far behind.
+        main.simulationSpeed = AnimationSpeed.Get(AnimationKind.Packets);
 
         var emission = ps.emission;
         emission.rateOverTime = TrailRateOverTime;
@@ -143,7 +146,7 @@ public class MagnetizingSparks : MonoBehaviour
         {
             Vector3 toTarget = targetPos - particles[i].position;
             Vector3 desired = toTarget.sqrMagnitude > 0.0001f ? toTarget.normalized * TrailSeekMaxSpeed : Vector3.zero;
-            particles[i].velocity = Vector3.Lerp(particles[i].velocity, desired, TrailSeekStrength * Time.deltaTime);
+            particles[i].velocity = Vector3.Lerp(particles[i].velocity, desired, TrailSeekStrength * AnimationSpeed.Delta(AnimationKind.Packets));
         }
         ps.SetParticles(particles, written);
     }
@@ -193,7 +196,7 @@ public class MagnetizingSparks : MonoBehaviour
         // Phase 1 — explode again: the fresh kick above is left alone this
         // long so arrival still reads as a burst, before anything starts
         // pulling the sparks back in toward the surface.
-        yield return new WaitForSeconds(ExplodeDuration);
+        yield return new WaitForSeconds(AnimationSpeed.Seconds(AnimationKind.Packets, ExplodeDuration));
 
         // Phase 2 — magnetize: every alive particle gets pulled toward its
         // own fixed point on the device's bounding surface (derived from its
@@ -204,7 +207,7 @@ public class MagnetizingSparks : MonoBehaviour
         float t = 0f;
         while (t < MagnetizeDuration)
         {
-            t += Time.deltaTime;
+            t += AnimationSpeed.Delta(AnimationKind.Packets);
             if (device == null) break; // device could've been removed mid-effect
             SteerToward(ps, bounds);
             yield return null;
@@ -216,12 +219,12 @@ public class MagnetizingSparks : MonoBehaviour
         float holdT = 0f;
         while (holdT < StickHold)
         {
-            holdT += Time.deltaTime;
+            holdT += AnimationSpeed.Delta(AnimationKind.Packets);
             DampVelocityToZero(ps);
             yield return null;
         }
 
-        Destroy(gameObject, ClingLifetimeTail + 0.5f);
+        Destroy(gameObject, AnimationSpeed.Seconds(AnimationKind.Packets, ClingLifetimeTail + 0.5f));
     }
 
     // Kicks every currently-alive particle radially outward from origin —
@@ -277,7 +280,7 @@ public class MagnetizingSparks : MonoBehaviour
 
             float speedScale = Mathf.Clamp01(dist / ArrivalRadius); // tapers off right as it arrives, instead of overshooting/orbiting
             Vector3 desired = dist > 0.0001f ? toTarget / dist * (ClingKickSpeed * speedScale) : Vector3.zero;
-            particles[i].velocity = Vector3.Lerp(particles[i].velocity, desired, 8f * Time.deltaTime);
+            particles[i].velocity = Vector3.Lerp(particles[i].velocity, desired, 8f * AnimationSpeed.Delta(AnimationKind.Packets));
         }
         ps.SetParticles(particles, written);
     }
@@ -290,7 +293,7 @@ public class MagnetizingSparks : MonoBehaviour
         var particles = new ParticleSystem.Particle[count];
         int written = ps.GetParticles(particles);
         for (int i = 0; i < written; i++)
-            particles[i].velocity = Vector3.Lerp(particles[i].velocity, Vector3.zero, 10f * Time.deltaTime);
+            particles[i].velocity = Vector3.Lerp(particles[i].velocity, Vector3.zero, 10f * AnimationSpeed.Delta(AnimationKind.Packets));
         ps.SetParticles(particles, written);
     }
 

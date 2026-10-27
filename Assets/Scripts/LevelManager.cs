@@ -7,10 +7,10 @@ using UnityEngine;
 /// attaches (see GameBootstrap.SetupLevelObjectives) and whether TutorialManager
 /// runs its guided walkthrough (see TutorialManager.Start).
 ///
-/// PendingLevelNumber follows the exact same idiom as
-/// TutorialManager.SkipOnNextLoad: a plain static field set by the menu side
-/// (LevelSelectManager.OnLevelClicked) immediately before the scene load,
-/// consumed-and-reset here in Awake() of the freshly loaded scene.
+/// PendingLevelNumber follows the same "plain static field set by the menu
+/// side (LevelSelectManager.OnLevelClicked) immediately before the scene
+/// load, consumed-and-reset here in Awake() of the freshly loaded scene" idiom
+/// used elsewhere in this project (see MainMenuBootstrap.OpenLevelSelectOnLoad).
 ///
 /// Defaults to DevSandboxLevel, not 1 — pressing Play directly on SampleScene in
 /// the Editor (bypassing the menu entirely) is how you build/test freely, not how

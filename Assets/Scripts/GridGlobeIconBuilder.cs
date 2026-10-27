@@ -4,8 +4,8 @@ using UnityEngine;
 
 /// <summary>
 /// Procedurally draws a small pixel-art "globe with a lat/long grid" icon —
-/// same runtime-generated, point-filtered, upscaled-blocky approach as
-/// CheckmarkIconBuilder (see that class). Used by PacketVisual as the glyph
+/// sampled once per logical cell and upscaled into solid blocks, same as
+/// CheckmarkIconBuilder (see PixelGlyph). Used by PacketVisual as the glyph
 /// for HTTP request/response packets in flight.
 /// </summary>
 public static class GridGlobeIconBuilder
@@ -43,43 +43,22 @@ public static class GridGlobeIconBuilder
         var key = new Params(stroke, logicalSize, strokeWidth, pixelScale);
         if (s_cache.TryGetValue(key, out Sprite cached) && cached != null) return cached;
 
-        int size = logicalSize * pixelScale;
-        var tex = new Texture2D(size, size, TextureFormat.RGBA32, false)
-        {
-            name = "GridGlobeIcon",
-            filterMode = FilterMode.Point,
-            wrapMode = TextureWrapMode.Clamp,
-        };
-
         Vector2 center = new Vector2(logicalSize * 0.5f, logicalSize * 0.5f);
         float radius = logicalSize * 0.42f;
         float half = strokeWidth * 0.5f;
-        var pixels = new Color32[size * size];
-        var clear = new Color32(0, 0, 0, 0);
 
-        for (int y = 0; y < size; y++)
+        bool[] mask = PixelGlyph.Rasterize(logicalSize, p =>
         {
-            float ly = (y + 0.5f) / pixelScale;
-            for (int x = 0; x < size; x++)
-            {
-                float lx = (x + 0.5f) / pixelScale;
-                Vector2 p = new Vector2(lx, ly);
-                float distFromCenter = Vector2.Distance(p, center);
-                if (distFromCenter > radius + half) { pixels[y * size + x] = clear; continue; }
+            float distFromCenter = Vector2.Distance(p, center);
+            if (distFromCenter > radius + half) return false;
 
-                bool onRing     = Mathf.Abs(distFromCenter - radius) <= half;
-                bool onEquator  = Mathf.Abs(p.y - center.y) <= half;
-                bool onMeridian = Mathf.Abs(EllipseBoundary(p, center, radius * 0.5f, radius)) <= half;
-                pixels[y * size + x] = (onRing || onEquator || onMeridian) ? stroke : clear;
-            }
-        }
+            bool onRing     = Mathf.Abs(distFromCenter - radius) <= half;
+            bool onEquator  = Mathf.Abs(p.y - center.y) <= half;
+            bool onMeridian = Mathf.Abs(EllipseBoundary(p, center, radius * 0.5f, radius)) <= half;
+            return onRing || onEquator || onMeridian;
+        });
 
-        tex.SetPixels32(pixels);
-        tex.Apply();
-
-        var sprite = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), 100f * pixelScale);
-        sprite.name = "GridGlobeIcon";
-
+        var sprite = PixelGlyph.ToSprite(PixelGlyph.Flat(mask, stroke), logicalSize, pixelScale, "GridGlobeIcon");
         s_cache[key] = sprite;
         return sprite;
     }

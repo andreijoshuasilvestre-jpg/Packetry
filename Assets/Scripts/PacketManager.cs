@@ -7,10 +7,8 @@ using UnityEngine;
 /// Owns every in-flight Packet: player-triggered spawning (TrySendMulti,
 /// called by PacketSendManager, which splits a shared route prefix into one
 /// trunk packet that fans out into per-destination packets — see SplitPacket),
-/// the reactive HttpRequest-to-HttpResponse round trip, per-cable in-flight
-/// capacity (Factorio-belt-style backpressure — a packet that can't advance
-/// holds at the end of its current segment instead of being dropped), and
-/// delivery/drop outcome events. Movement reuses Cable.SampleCurve/PathLength
+/// the reactive HttpRequest-to-HttpResponse round trip, and delivery/drop
+/// outcome events. Movement reuses Cable.SampleCurve/PathLength
 /// per segment; outcome feedback reuses Cable.SetPulse, the exact idiom
 /// PingToolManager already uses for ping results.
 /// </summary>
@@ -21,15 +19,13 @@ public class PacketManager : MonoBehaviour
     public event Action<Packet> OnPacketDelivered;
     public event Action<Packet> OnPacketDropped;
 
-    [SerializeField] private int maxInFlightPerCable = 4;
-
-    // Departure/arrival wipe timings — mirror PingPacketEffect's own
-    // SourceGlow*/DestWipeDuration constants so a regular transfer's
-    // touch-the-device beats read with the same pacing a ping's do.
-    const float SourceGlowBuild      = 0.16f;
-    const float SourceGlowHold       = 0.05f;
-    const float SourceGlowFade       = 0.22f;
-    const float DeliveryWipeDuration = 0.4f;
+    // Departure wipe timing — mirrors PingPacketEffect's own SourceGlow*
+    // constants so a regular transfer's touch-the-device beat reads with the
+    // same pacing a ping's does. Arrival timing now lives in PingWipeEffect's
+    // own NotifyArrival/RunSustained (see PlayDeliveryEffects).
+    const float SourceGlowBuild = 0.16f;
+    const float SourceGlowHold  = 0.05f;
+    const float SourceGlowFade  = 0.22f;
 
     private readonly List<Packet> activePackets = new();
 
@@ -44,8 +40,25 @@ public class PacketManager : MonoBehaviour
         Instance = this;
     }
 
+    // One travel loop for all traffic — Run Network packets and pings alike
+    // (PingPacketEffect reports into NetworkActivity too) — sounding exactly
+    // while something's in flight. LateUpdate so every traffic source has
+    // already reported in for this frame.
+    void LateUpdate()
+    {
+        if (NetworkActivity.IsInFlight) AudioManager.Instance?.StartLoop(SfxId.PacketTravel);
+        else                            AudioManager.Instance?.StopLoop(SfxId.PacketTravel);
+    }
+
+    void OnDisable() => AudioManager.Instance?.StopLoop(SfxId.PacketTravel);
+
     void Update()
     {
+        // Checked before the loop below removes anything, so the frame the
+        // last packet lands still counts — NetworkActivity's landing window
+        // runs from here.
+        if (activePackets.Count > 0) NetworkActivity.MarkActive();
+
         var flowingNow = new Dictionary<Cable, (bool reversed, Color tint)>();
 
         for (int i = activePackets.Count - 1; i >= 0; i--)
@@ -61,7 +74,7 @@ public class PacketManager : MonoBehaviour
                 continue;
             }
 
-            p.T += PacketVisual.SpeedFor(p.Type) * Time.deltaTime / Mathf.Max(0.0001f, cable.PathLength);
+            p.T += PacketVisual.SpeedFor(p.Type) * AnimationSpeed.Delta(AnimationKind.Packets) / Mathf.Max(0.0001f, cable.PathLength);
 
             if (p.T >= 1f)
             {
@@ -75,20 +88,12 @@ public class PacketManager : MonoBehaviour
                     continue;
                 }
 
-                Cable nextCable = p.Path[p.HopIndex + 1];
-                int weight = PacketVisual.CapWeightFor(p.Type);
-                if (Occupancy(nextCable) + weight > maxInFlightPerCable)
-                {
-                    p.T = 1f; // hold at the tail of the current segment until a slot frees — congestion, not a drop
-                }
-                else
-                {
-                    p.HopIndex++;
-                    p.T = 0f;
-                    cable = p.Path[p.HopIndex];
-                    from  = p.Waypoints[p.HopIndex];
-                    PacketDeviceEffect.Play(from, p.Tint);
-                }
+                p.HopIndex++;
+                p.T = 0f;
+                cable = p.Path[p.HopIndex];
+                from  = p.Waypoints[p.HopIndex];
+                PacketDeviceEffect.Play(from, p.Tint);
+                AudioManager.Instance?.PlaySfx(SfxId.PacketHop);
             }
 
             bool reversed = cable.DeviceA != from;
@@ -110,35 +115,72 @@ public class PacketManager : MonoBehaviour
 
         flowingLastFrame.Clear();
         flowingLastFrame.UnionWith(flowingNow.Keys);
+
+        // Re-derived from activePackets every frame rather than shown/hidden
+        // at spawn/finish — every way a packet leaves the list (delivered,
+        // dropped by a broken hop, a device deleted mid-flight) clears it
+        // with no extra bookkeeping, and an HttpRequest's auto-spawned
+        // response lands in the list during this same loop (see Finish), so
+        // the line hands straight over from request to response instead of
+        // flickering off for a frame.
+        ActivitySubtitle.Instance?.Show(this, InFlightActivityLabel());
     }
+
+    // ── Activity subtitle ────────────────────────────────────────────────────
+
+    const string MixedActivityLabel = "SENDING PACKETS";
+
+    /// <summary>What the bottom-of-screen ActivitySubtitle should say about
+    /// the packets currently in flight — that type's own line if they're all
+    /// the same type, a generic one if they're mixed, null (hide) if none.</summary>
+    string InFlightActivityLabel()
+    {
+        if (activePackets.Count == 0) return null;
+
+        PacketType type = activePackets[0].Type;
+        for (int i = 1; i < activePackets.Count; i++)
+            if (activePackets[i].Type != type) return MixedActivityLabel;
+
+        return ActivityLabelFor(type);
+    }
+
+    static string ActivityLabelFor(PacketType type) => type switch
+    {
+        PacketType.HttpRequest  => "SENDING HTTP REQUEST",
+        PacketType.HttpResponse => "SENDING HTTP RESPONSE",
+        PacketType.FileTransfer => "TRANSFERRING FILE",
+        _                       => MixedActivityLabel, // a newly added type still gets a sensible line until it's given its own
+    };
 
     // ── Public API ───────────────────────────────────────────────────────────
 
     /// <summary>Player-triggered send to one or more destinations at once.
-    /// Returns the user-facing failure reason for each destination that
-    /// couldn't be sent to (empty if all succeeded). All destinations that
-    /// pass validation share a single visual "trunk" packet out of source for
-    /// whatever route prefix they all have in common (often the source's one
-    /// uplink cable); it splits into one packet per destination the moment
-    /// their routes diverge, rather than looking like N independent sends
-    /// from frame one.</summary>
-    public List<string> TrySendMulti(NetworkDevice source, List<NetworkDevice> destinations, PacketType type)
+    /// Returns the user-facing failure reason paired with which destination it
+    /// applies to, for each destination that couldn't be sent to (empty if all
+    /// succeeded) — the pairing lets the caller (PacketSendManager) play a
+    /// per-device failure effect rather than just a blind count. All
+    /// destinations that pass validation share a single visual "trunk" packet
+    /// out of source for whatever route prefix they all have in common (often
+    /// the source's one uplink cable); it splits into one packet per
+    /// destination the moment their routes diverge, rather than looking like N
+    /// independent sends from frame one.</summary>
+    public List<(NetworkDevice dest, string reason)> TrySendMulti(NetworkDevice source, List<NetworkDevice> destinations, PacketType type)
     {
-        var failures = new List<string>();
+        var failures = new List<(NetworkDevice dest, string reason)>();
         var direct = new List<(NetworkDevice dest, List<Cable> path)>();
 
         foreach (var dest in destinations)
         {
-            if (source == null || dest == null) { failures.Add("Invalid device."); continue; }
-            if (source == dest) { failures.Add("Source and destination must be different devices."); continue; }
+            if (source == null || dest == null) { failures.Add((dest, "Invalid device.")); continue; }
+            if (source == dest) { failures.Add((dest, "Source and destination must be different devices.")); continue; }
 
             var srcAddr = source.GetComponent<DeviceAddress>();
             var dstAddr = dest.GetComponent<DeviceAddress>();
-            if (srcAddr == null || !srcAddr.HasAddress) { failures.Add("Source has no IP address configured."); continue; }
-            if (dstAddr == null || !dstAddr.HasAddress) { failures.Add("Destination has no IP address configured."); continue; }
+            if (srcAddr == null || !srcAddr.HasAddress) { failures.Add((dest, "Source has no IP address configured.")); continue; }
+            if (dstAddr == null || !dstAddr.HasAddress) { failures.Add((dest, "Destination has no IP address configured.")); continue; }
 
             ReachabilityService.PingResult result = ReachabilityService.Ping(source, dest);
-            if (!result.Success) { failures.Add(result.FailureReason); continue; }
+            if (!result.Success) { failures.Add((dest, result.FailureReason)); continue; }
             direct.Add((dest, result.Path));
         }
 
@@ -147,7 +189,7 @@ public class PacketManager : MonoBehaviour
         if (direct.Count == 1)
         {
             string failure = SpawnWithPath(source, direct[0].dest, type, direct[0].path, null, null);
-            if (failure != null) failures.Add(failure);
+            if (failure != null) failures.Add((direct[0].dest, failure));
             return failures;
         }
 
@@ -163,7 +205,7 @@ public class PacketManager : MonoBehaviour
             foreach (var (dest, path) in direct)
             {
                 string failure = SpawnWithPath(source, dest, type, path, null, null);
-                if (failure != null) failures.Add(failure);
+                if (failure != null) failures.Add((dest, failure));
             }
             return failures;
         }
@@ -183,7 +225,7 @@ public class PacketManager : MonoBehaviour
 
         string trunkFailure = SpawnWithPath(source, null, type, trunkPath, null, branches);
         if (trunkFailure != null)
-            foreach (var _ in direct) failures.Add(trunkFailure); // whole batch blocked at the shared first hop
+            foreach (var (dest, _) in direct) failures.Add((dest, trunkFailure)); // whole batch blocked at the shared first hop
 
         return failures;
     }
@@ -208,22 +250,27 @@ public class PacketManager : MonoBehaviour
     string SpawnWithPath(NetworkDevice source, NetworkDevice dest, PacketType type, List<Cable> path,
                           Packet linkedRequest, List<PacketBranch> pendingBranches)
     {
-        int weight = PacketVisual.CapWeightFor(type);
-        if (path.Count > 0 && Occupancy(path[0]) + weight > maxInFlightPerCable)
-            return "The first link on this route is already at capacity — try again shortly.";
-
         var srcAddr = source.GetComponent<DeviceAddress>();
-        Color tint = GameTheme.SubnetTint(SubnetMath.NetworkAddress(srcAddr.Ip, srcAddr.Mask));
+        Color tint = GameTheme.SubnetTint(SubnetMath.SubnetOf(srcAddr.Ip, srcAddr.Mask));
 
         // Same beat PingPacketEffect opens its journey with — the source
         // glows uniformly (screen-scoped on a PC, see PingWipeEffect) right
         // as the packet forms, tinted by this send's PacketType rather than
         // subnet so "this is an HTTP request" / "this is a file" reads at a
-        // glance even before the traveling icon is visible.
+        // glance even before the traveling icon is visible. Skipped for an
+        // auto-generated HttpResponse (linkedRequest != null) — that source
+        // is the device that JUST played its own arrival glow receiving the
+        // request a moment ago, so charging up again here read as the same
+        // wipe firing twice in a row rather than two distinct events.
         Color typeColor = PacketVisual.ColorFor(type);
-        int exitPortIndex = path.Count > 0 ? source.GetPortIndexForCable(path[0]) : -1;
-        Vector3 exitPoint = exitPortIndex >= 0 ? source.GetPortWorldPoint(exitPortIndex) : source.VisualTopPoint();
-        PingWipeEffect.PlayGlowPulse(source, exitPoint, typeColor, SourceGlowBuild, SourceGlowHold, SourceGlowFade);
+        if (linkedRequest == null && !PCMonitor.PlaySend(source, typeColor, PacketVisual.ScreenGlyphFor(type)))
+        {
+            // Fallback for a source without a monitor — a PC flashes its
+            // screen and shows the type's glyph instead (see PCMonitor).
+            int exitPortIndex = path.Count > 0 ? source.GetPortIndexForCable(path[0]) : -1;
+            Vector3 exitPoint = exitPortIndex >= 0 ? source.GetPortWorldPoint(exitPortIndex) : source.VisualTopPoint();
+            PingWipeEffect.PlayGlowPulse(source, exitPoint, typeColor, SourceGlowBuild, SourceGlowHold, SourceGlowFade);
+        }
 
         var packet = new Packet
         {
@@ -248,9 +295,7 @@ public class PacketManager : MonoBehaviour
     // it fans out into one child Packet per remaining destination, each
     // continuing from here along its own Path/Waypoints tail. A branch whose
     // Path is already empty means that destination WAS the split point, so it
-    // delivers immediately instead of spawning a zero-length mover; a branch
-    // whose first hop is already at capacity drops the same way a fresh single
-    // send would.
+    // delivers immediately instead of spawning a zero-length mover.
     void SplitPacket(Packet trunk)
     {
         if (trunk.Visual != null) Destroy(trunk.Visual.gameObject);
@@ -265,17 +310,6 @@ public class PacketManager : MonoBehaviour
                     Type = trunk.Type, Source = trunk.Source, Destination = branch.Destination,
                     Path = branch.Path, Waypoints = branch.Waypoints, Tint = trunk.Tint,
                 }, delivered: true);
-                continue;
-            }
-
-            int weight = PacketVisual.CapWeightFor(trunk.Type);
-            if (Occupancy(branch.Path[0]) + weight > maxInFlightPerCable)
-            {
-                Finish(new Packet
-                {
-                    Type = trunk.Type, Source = trunk.Source, Destination = branch.Destination,
-                    Path = branch.Path, Waypoints = branch.Waypoints,
-                }, delivered: false);
                 continue;
             }
 
@@ -307,15 +341,6 @@ public class PacketManager : MonoBehaviour
             wp.Add(cur);
         }
         return wp;
-    }
-
-    int Occupancy(Cable cable)
-    {
-        int sum = 0;
-        foreach (var p in activePackets)
-            if (p.HopIndex < p.Path.Count && p.Path[p.HopIndex] == cable)
-                sum += PacketVisual.CapWeightFor(p.Type);
-        return sum;
     }
 
     // A router interface can be shut down mid-flight via RouterCLI — treat
@@ -364,26 +389,48 @@ public class PacketManager : MonoBehaviour
         {
             StartCoroutine(PlayDeliveryEffects(p));
 
-            if (p.Type == PacketType.HttpRequest)
-                Spawn(p.Destination, p.Source, PacketType.HttpResponse, p);
+            // The response is routed fresh, receiver back to sender — if the
+            // network changed while the request was in flight (a cable
+            // pulled, an interface shut down, a device removed) that can
+            // fail. Treat it like any other drop rather than the reply just
+            // silently never appearing.
+            if (p.Type == PacketType.HttpRequest &&
+                Spawn(p.Destination, p.Source, PacketType.HttpResponse, p) != null)
+            {
+                PacketFailureEffect.Play(p.Destination, p.Source);
+                OnPacketDropped?.Invoke(new Packet
+                {
+                    Type = PacketType.HttpResponse, State = PacketState.Dropped,
+                    Source = p.Destination, Destination = p.Source, LinkedRequest = p,
+                    Path = new List<Cable>(), Waypoints = new List<NetworkDevice>(),
+                });
+            }
 
             OnPacketDelivered?.Invoke(p);
         }
         else
         {
             if (p.Visual != null) Destroy(p.Visual.gameObject);
+            // Both ends show the error. A trunk packet's Destination is null
+            // (see Packet.PendingBranches' doc comment) — no single receiver
+            // to blame a shared-prefix drop on, so only its sender shows it.
+            PacketFailureEffect.Play(p.Source, p.Destination);
             OnPacketDropped?.Invoke(p);
         }
     }
 
     // Mirrors PingPacketEffect's own arrival beat: squash the traveling body
     // flat (PacketTravelEffect.PlaySquashOut) instead of just vanishing it,
-    // then sweep a forward wipe across the destination and, once it fully
-    // covers, pop the delivered PacketType's own icon (globe for HTTP, folder
-    // for a file) on top — the packet-transfer counterpart to
-    // PingCheckmarkEffect's plain success tick, colored/shaped per type
-    // instead. PingCheckmarkEffect already accepts an arbitrary icon Sprite,
-    // so this reuses it as-is rather than duplicating the pop-in/bob/fade.
+    // then notify the destination's screen glow and, once it's lit, pop the
+    // delivered PacketType's own icon (globe for HTTP, folder for a file) on
+    // top — the packet-transfer counterpart to PingCheckmarkEffect's plain
+    // success tick, colored/shaped per type instead. PingCheckmarkEffect
+    // already accepts an arbitrary icon Sprite, so this reuses it as-is
+    // rather than duplicating the pop-in/bob/fade. Uses NotifyArrival, not a
+    // fresh PlayForward every time — several packets landing on the same
+    // device in a burst (multiple senders targeting one PC, or a multi-hop
+    // File Transfer) coalesce into one continuous glow instead of each
+    // packet retriggering its own sweep-in/fade-out.
     IEnumerator PlayDeliveryEffects(Packet p)
     {
         if (p.Visual != null)
@@ -401,10 +448,15 @@ public class PacketManager : MonoBehaviour
         Vector3 entryPoint = entryPortIndex >= 0 ? dest.GetPortWorldPoint(entryPortIndex) : dest.VisualTopPoint();
 
         Color typeColor = PacketVisual.ColorFor(p.Type);
-        PingWipeEffect.PlayForward(dest, entryPoint, typeColor, DeliveryWipeDuration, () =>
+        Action onPeak = () =>
         {
             PacketDeviceEffect.Play(dest, typeColor, PacketDeviceEffect.PlacementIntensity);
             PingCheckmarkEffect.Play(dest, typeColor, PacketVisual.IconFor(p.Type));
-        });
+            AudioManager.Instance?.PlaySfx(SfxId.PacketSuccess);
+        };
+        // A PC's monitor coalesces a burst of arrivals itself (PCMonitor.
+        // PlayReceive), same as NotifyArrival does for the fallback wipe.
+        if (!PCMonitor.PlayReceive(dest, typeColor, PacketVisual.ScreenGlyphFor(p.Type), onPeak))
+            PingWipeEffect.NotifyArrival(dest, entryPoint, typeColor, onPeak);
     }
 }

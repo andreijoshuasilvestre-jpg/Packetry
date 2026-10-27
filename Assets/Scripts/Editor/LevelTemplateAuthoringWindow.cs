@@ -195,7 +195,10 @@ static class LevelTemplateBaker
             if (SubnetMath.IsDottedQuad(d.ipAddress) && SubnetMath.IsDottedQuad(d.ipMask))
             {
                 var templateAddr = go.AddComponent<DeviceAddress>();
-                templateAddr.SetAddress(d.ipAddress, d.ipMask);
+                // Keep the order the author applied addresses in — it decides
+                // which subnet colors a Switch (see SubnetVisualizer). Any
+                // baked time is still older than anything the player does.
+                templateAddr.SetAddress(d.ipAddress, d.ipMask, d.addressedAtTicks);
             }
 
             if (d.portActive != null)
@@ -215,6 +218,7 @@ static class LevelTemplateBaker
                     pc.ip       = ic.ip ?? "";
                     pc.mask     = ic.mask ?? "";
                     pc.shutdown = ic.shutdown;
+                    pc.addressedAtTicks = ic.addressedAtTicks;
                 }
             }
 
@@ -264,12 +268,14 @@ static class LevelTemplateBaker
         lightGo.AddComponent<TemplatePreviewOnly>();
     }
 
+    // Mirrors CableManager.CreateCable's own material construction exactly
+    // (tint + Cable.GetCableTexture()) — a baked cable used to build a plain
+    // white, textureless material instead, so pre-placed cables rendered
+    // visibly lighter/flatter than ones the player draws themselves.
     static Material MakeLineMaterial()
     {
         Shader shader = Shader.Find("Universal Render Pipeline/Particles/Unlit") ?? Shader.Find("Sprites/Default");
-        var mat = new Material(shader);
-        if (mat.HasProperty("_BaseColor")) mat.SetColor("_BaseColor", Color.white);
-        return mat;
+        return new Material(shader) { color = DefaultCableColor, mainTexture = Cable.GetCableTexture() };
     }
 
     static void AddSceneToBuildSettings(string path)

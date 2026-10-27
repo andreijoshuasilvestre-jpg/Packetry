@@ -19,8 +19,14 @@ public class PingToolManager : MonoBehaviour
     // without polling, same idiom as CableManager.OnCableCreated.
     public event Action<NetworkDevice, NetworkDevice, ReachabilityService.PingResult> OnPingCompleted;
 
+    // Bottom-of-screen line while a successful ping's packet is traveling
+    // (ActivitySubtitle animates the trailing dots itself). A failed ping has
+    // no travel phase — its result is instant — so it never posts one.
+    const string PingingSubtitle = "PINGING";
+
     bool isPinging;
     NetworkDevice sourceDevice;
+    PingSelectBadge sourceBadge;
     Camera mainCamera;
 
     static MaterialPropertyBlock s_propBlock;
@@ -40,7 +46,7 @@ public class PingToolManager : MonoBehaviour
     {
         if (!isPinging) return;
         if (CLIPanelManager.Instance != null && CLIPanelManager.Instance.IsOpen) return;
-        if (SettingsPanelManager.Instance != null && SettingsPanelManager.Instance.IsOpen) return;
+        if (InteractionMode.IsSuspended) return;
         if (DeviceAddressPopup.Instance != null && DeviceAddressPopup.Instance.IsOpen) return;
 
         if (Mouse.current.leftButton.wasPressedThisFrame && !IsPointerOverUI())
@@ -66,6 +72,7 @@ public class PingToolManager : MonoBehaviour
         {
             NotificationManager.Instance?.Notify(
                 "That device has no IP address yet — right-click a PC to configure one.", NotifyKind.Warning);
+            AudioManager.Instance?.PlaySfx(SfxId.Refusal);
             return;
         }
 
@@ -73,17 +80,28 @@ public class PingToolManager : MonoBehaviour
         {
             sourceDevice = device;
             HighlightDevice(device, true);
+            AudioManager.Instance?.PlaySfx(SfxId.Tagging);
+            // A floating green ping badge over it, and its monitor's looping
+            // radar screen, until the ping fires or the pick is cancelled.
+            sourceBadge = PingSelectBadge.Attach(device, outgoing: true);
+            PCMonitor.SetStandby(device, GameTheme.Success, PCMonitor.ScreenGlyph.Ping, outgoing: true);
         }
         else if (device != sourceDevice)
         {
             NetworkDevice dest = device;
             NetworkDevice source = sourceDevice;
+            PingSelectBadge badge = sourceBadge;
+            sourceBadge = null; // handed to RunPing — it stays up while the ping travels, so Cancel mustn't remove it
             Cancel(); // reset selection state before running/reporting the result
-            RunPing(source, dest);
+            RunPing(source, dest, badge);
         }
     }
 
-    void RunPing(NetworkDevice source, NetworkDevice dest)
+    // srcBadge is the source's ping badge from TrySelect — the destination
+    // gets its own (rings closing in) and both stay up until the ping lands,
+    // where PingCheckmarkEffect's tick pops in at the same height. A failed
+    // ping has no journey to wait for, and its cross pops in right away.
+    void RunPing(NetworkDevice source, NetworkDevice dest, PingSelectBadge srcBadge)
     {
         ReachabilityService.PingResult result = ReachabilityService.Ping(source, dest);
 
@@ -99,16 +117,35 @@ public class PingToolManager : MonoBehaviour
             // source/destination touch feedback the instant dual bounce used
             // to provide below — a failed ping has no walked Path to
             // animate, so it keeps that instant feedback instead.
-            PingPacketEffect.Play(source, dest, result.Path, GameTheme.Success);
+            PingSelectBadge destBadge = PingSelectBadge.Attach(dest, outgoing: false);
+            AudioManager.Instance?.PlaySfx(SfxId.Tagging); // a failed ping skips this — PingError below says it instead
+            PingPacketEffect journey = PingPacketEffect.Play(source, dest, result.Path, GameTheme.Success, onLanded: () =>
+            {
+                PingSelectBadge.Remove(srcBadge);
+                PingSelectBadge.Remove(destBadge);
+            });
+
+            // Keyed to the journey itself rather than to this manager: pings
+            // can overlap (a second one fired while the first is still
+            // traveling) and each should hold the subtitle up for its own
+            // trip, and ActivitySubtitle drops a line on its own once its
+            // owner object is destroyed — which the journey does the moment
+            // the orb hits the destination or the path breaks — so there's no
+            // matching Hide to keep in sync.
+            if (journey != null) ActivitySubtitle.Instance?.Show(journey, PingingSubtitle);
 
             string hops = result.HopCount == 1 ? "1 hop" : $"{result.HopCount} hops";
             NotificationManager.Instance?.Notify($"Ping succeeded — {hops}.", NotifyKind.Success);
-            AudioManager.Instance?.PlaySfx(SfxId.Success);
+            // No success sound here — PingPacketEffect plays it the moment
+            // the packet actually lands on the destination.
         }
         else
         {
+            PingSelectBadge.Remove(srcBadge);
             PacketDeviceEffect.Play(source, GameTheme.Danger);
             PacketDeviceEffect.Play(dest, GameTheme.Danger);
+            PCMonitor.PlayError(source);
+            PCMonitor.PlayError(dest);
 
             // No top-of-screen banner for a failed ping anymore — instead the
             // same "materialize above the device" payoff the success case gets
@@ -117,11 +154,11 @@ public class PingToolManager : MonoBehaviour
             // a failed ping has no walked Path to single out one side of (see
             // ReachabilityService.Fail), so both already get equal Danger
             // feedback above via PacketDeviceEffect.
-            Sprite cross = CrossIconBuilder.GetSprite(Color.white);
+            Sprite cross = PingCheckmarkEffect.FailureGlyph;
             PingCheckmarkEffect.Play(source, GameTheme.Danger, cross);
             PingCheckmarkEffect.Play(dest, GameTheme.Danger, cross);
 
-            AudioManager.Instance?.PlaySfx(SfxId.Fail);
+            AudioManager.Instance?.PlaySfx(SfxId.PingError);
         }
 
         OnPingCompleted?.Invoke(source, dest, result);
@@ -143,7 +180,13 @@ public class PingToolManager : MonoBehaviour
 
     void Cancel()
     {
-        if (sourceDevice != null) HighlightDevice(sourceDevice, false);
+        if (sourceDevice != null)
+        {
+            HighlightDevice(sourceDevice, false);
+            PCMonitor.ClearStandby(sourceDevice);
+        }
+        PingSelectBadge.Remove(sourceBadge);
+        sourceBadge = null;
         sourceDevice = null;
         isPinging = false;
     }
@@ -167,7 +210,13 @@ public class PingToolManager : MonoBehaviour
         s_propBlock ??= new MaterialPropertyBlock();
         foreach (var r in device.GetComponentsInChildren<Renderer>())
         {
-            string prop = r.sharedMaterial.HasProperty("_BaseColor") ? "_BaseColor" : "_Color";
+            // Same guards as PacketSendManager.HighlightDevice — a renderer
+            // with no material, or one with neither color property, is
+            // skipped rather than throwing mid-click.
+            if (r.sharedMaterial == null) continue;
+            bool hasBase = r.sharedMaterial.HasProperty("_BaseColor");
+            if (!hasBase && !r.sharedMaterial.HasProperty("_Color")) continue;
+            string prop = hasBase ? "_BaseColor" : "_Color";
             Color orig = r.sharedMaterial.GetColor(prop);
             s_propBlock.Clear();
             s_propBlock.SetColor(prop, Color.Lerp(orig, GameTheme.Info, 0.5f));

@@ -46,6 +46,45 @@ public class NetworkDevice : MonoBehaviour
     // (checked in DragDropManager.Drop()). Set per device type in DeviceModelBuilder.
     public bool requiresTable = false;
 
+    // Read-only view of every live device — mirrors Table.AllTables. Cable uses
+    // this to route around/over a device's own body instead of clipping through
+    // it (see Cable.AvoidDevices). Palette-shelf items are filtered out by the
+    // reader (isPaletteItem can still be true/false-flipping at the moment this
+    // fires during Instantiate — see DragDropManager — so checking it live at
+    // query time is safer than baking it in here).
+    private static readonly List<NetworkDevice> s_all = new List<NetworkDevice>();
+    public static IReadOnlyList<NetworkDevice> AllDevices => s_all;
+
+    void OnEnable()  => s_all.Add(this);
+    void OnDisable() => s_all.Remove(this);
+
+    // The root BoxCollider DeviceModelBuilder adds to every device (PC/Switch/
+    // Router) already matches its visual footprint exactly, so this reuses it
+    // rather than duplicating width/height/length as separate fields the way
+    // Table does. Deliberately NOT BoxCollider.bounds — PhysX only re-syncs a
+    // kinematic Rigidbody's collider a physics step after transform.position
+    // changes, so .bounds reads one frame stale while DragDropManager is
+    // actively moving a device (this is presumably also why Table computes
+    // ContainsXZ from its own transform/fields rather than a collider). Instead
+    // transform the local box's corners through this frame's actual transform,
+    // which is always exactly in sync. Encapsulating all 8 corners (not just
+    // center +/- extents) keeps this correct if a device is ever rotated.
+    private BoxCollider _footprintCollider;
+    public Bounds? FootprintBounds()
+    {
+        _footprintCollider ??= GetComponent<BoxCollider>();
+        if (_footprintCollider == null) return null;
+
+        Vector3 c = _footprintCollider.center;
+        Vector3 e = _footprintCollider.size * 0.5f;
+        Bounds b = new Bounds(transform.TransformPoint(c), Vector3.zero);
+        for (int sx = -1; sx <= 1; sx += 2)
+            for (int sy = -1; sy <= 1; sy += 2)
+                for (int sz = -1; sz <= 1; sz += 2)
+                    b.Encapsulate(transform.TransformPoint(c + Vector3.Scale(e, new Vector3(sx, sy, sz))));
+        return b;
+    }
+
     // [SerializeField] so Unity's Instantiate() (used to clone the placed-device
     // template in DragDropManager) actually copies port state to the clone —
     // a plain, non-serialized field would silently reset to empty on every clone.
@@ -148,8 +187,13 @@ public class NetworkDevice : MonoBehaviour
 
             if (!on) { r.SetPropertyBlock(null); continue; }
 
+            // Same guards as PacketSendManager.HighlightDevice.
+            if (r.sharedMaterial == null) continue;
+            bool hasBase = r.sharedMaterial.HasProperty("_BaseColor");
+            if (!hasBase && !r.sharedMaterial.HasProperty("_Color")) continue;
+
             s_portHighlightBlock ??= new MaterialPropertyBlock();
-            string prop = r.sharedMaterial.HasProperty("_BaseColor") ? "_BaseColor" : "_Color";
+            string prop = hasBase ? "_BaseColor" : "_Color";
             s_portHighlightBlock.Clear();
             s_portHighlightBlock.SetColor(prop, color);
             r.SetPropertyBlock(s_portHighlightBlock);

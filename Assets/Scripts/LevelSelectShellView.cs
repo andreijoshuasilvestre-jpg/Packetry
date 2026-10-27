@@ -16,16 +16,16 @@ using UnityEngine.UI;
 /// </summary>
 public class LevelSelectShellView : MonoBehaviour
 {
-    public SlidePanel PanelSlide;
+    public ZoomPanel PanelSlide; // basic scale 0->1 zoom in/out — see ZoomPanel, LevelSelectManager.Open/ClosePanel/OnLevelClicked
     public RectTransform ContentRt;
-    public VerticalLayoutGroup ContentLayout; // padding recomputed at runtime once the level count is known — see LevelSelectManager
+    public VerticalLayoutGroup ContentLayout; // padding recomputed at runtime once the cards are known — see LevelSelectManager.RefreshCards
     public SmoothScrollRect ScrollRect;
     public LevelCarousel Carousel;
 
     public MenuButtonRefs BackButton;
 
     public GameObject DescDim;
-    public SlidePanel DescSlide;
+    public ZoomPanel DescZoom; // null on a shell baked while the popup still used SlidePanel — LevelSelectManager.Build upgrades that at runtime
     public TextMeshProUGUI DescTitleTmp;
     public TextMeshProUGUI DescCategoryTmp;
     public TextMeshProUGUI DescBodyTmp;

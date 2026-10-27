@@ -1,0 +1,350 @@
+{
+  "voice": "af_heart",
+  "speed": 1.0,
+  "lines": [
+    {
+      "id": "L1-01",
+      "text": "Welcome! Let's build your first network together, one step at a time. Tip: rest your mouse on any button to see what it does. Click Next to begin."
+    },
+    {
+      "id": "L1-02",
+      "text": "Let's get a closer look first. Zoom in on the play area: scroll your mouse wheel, or click the zoom-in button in the bottom-right corner."
+    },
+    {
+      "id": "L1-03",
+      "text": "You can also pan the camera around. Try it — hold <key>WASD</key> to move the view."
+    },
+    {
+      "id": "L1-04",
+      "text": "You can also turn the view to see things from another side. Click a turn button in the bottom-right corner (or press <key>Q</key> / <key>E</key>)."
+    },
+    {
+      "id": "L1-05",
+      "text": "Every device needs somewhere to sit. Click <b>Table</b>, then click the glowing circle <b>once</b> to set the table's first corner."
+    },
+    {
+      "id": "L1-06",
+      "text": "First corner set! Now move your mouse to the new glowing circle — the table stretches to follow — and click <b>once</b> more to set the opposite corner."
+    },
+    {
+      "id": "L1-06a",
+      "text": "Tables can be resized. Click your table <b>once</b> to select it."
+    },
+    {
+      "id": "L1-06b",
+      "text": "Handles appeared on its corners and edges. Press and hold the marked edge handle."
+    },
+    {
+      "id": "L1-06c",
+      "text": "Keep holding, drag the edge out to the glowing circle, then let go to make the table bigger."
+    },
+    {
+      "id": "L1-07",
+      "text": "Press and hold <b>PC</b>, drag it over the table, then let go to drop it there. It must land inside the table's glowing outline."
+    },
+    {
+      "id": "L1-08",
+      "text": "Now rotate it: left-click your PC to select it (it glows cyan), then click a rotate button at the bottom of the screen. (Holding <key>R</key> and scrolling works too.)"
+    },
+    {
+      "id": "L1-09",
+      "text": "Placed devices can be moved too. Click and hold your PC to pick it up."
+    },
+    {
+      "id": "L1-10",
+      "text": "Keep holding, drag it to the glowing spot, then let go to place it down."
+    },
+    {
+      "id": "L1-11",
+      "text": "Drag another <b>PC</b> from the sidebar onto the table."
+    },
+    {
+      "id": "L1-12",
+      "text": "That button holds more than PCs. Click the <b>arrow</b> beside it to see the other tools. (Right-clicking the button works too.)"
+    },
+    {
+      "id": "L1-13",
+      "text": "Now drag <b>Switch</b> out onto the table — it's what connects your PCs together."
+    },
+    {
+      "id": "L1-14",
+      "text": "Every device has one or more <b>ports</b> — the small connection points cables plug into. If a device has more than one, a popup will ask which one to use when you connect a cable."
+    },
+    {
+      "id": "L1-15",
+      "text": "Click <b>Cable</b> to start wiring your network."
+    },
+    {
+      "id": "L1-16",
+      "text": "Now click your first PC — that's where the cable starts."
+    },
+    {
+      "id": "L1-17",
+      "text": "A list of free ports pops up — click one (like <b>eth0</b>) to plug the cable in there."
+    },
+    {
+      "id": "L1-18",
+      "text": "Now click the <b>Switch</b> to finish the connection."
+    },
+    {
+      "id": "L1-19",
+      "text": "Pick a free port on the Switch the same way to complete the cable."
+    },
+    {
+      "id": "L1-20",
+      "text": "Click <b>Cable</b> again, then repeat: click your second PC, pick a port, click the Switch, and pick a port there too."
+    },
+    {
+      "id": "L1-21",
+      "text": "Your network is built! Networks change too — let's learn to undo some of it. Click <b>Remove</b>, then click one of your cables to delete it."
+    },
+    {
+      "id": "L1-22",
+      "text": "<b>Remove</b> has an arrow too. Click the arrow to see the other removal tools."
+    },
+    {
+      "id": "L1-23",
+      "text": "Click <b>Remove Device</b>, then click one of your devices to delete it."
+    },
+    {
+      "id": "L1-24",
+      "text": "Click the arrow beside <b>Remove</b> again to find the last tool."
+    },
+    {
+      "id": "L1-25",
+      "text": "Click <b>Remove Table</b>, then click your table to delete it."
+    },
+    {
+      "id": "L1-26",
+      "text": "Great work — you've learned to build a network, and take it apart when you need to."
+    },
+    {
+      "id": "L2-01",
+      "text": "Right-click a PC to open its address popup, then give it an IP address and subnet mask (e.g. 192.168.1.10 / 255.255.255.0)."
+    },
+    {
+      "id": "L2-02",
+      "text": "Right-click the other PC and give it an IP on a DIFFERENT subnet (different network portion, e.g. 192.168.2.11) — let's see what happens when two devices can't reach each other."
+    },
+    {
+      "id": "L2-03",
+      "text": "Click <b>Ping</b>, then pick the two PCs — since they're on different subnets, the ping will fail. Watch what that failure looks like."
+    },
+    {
+      "id": "L2-04",
+      "text": "Right-click the second PC again and change its address so it's on the SAME subnet as the first PC (e.g. 192.168.1.11)."
+    },
+    {
+      "id": "L2-05",
+      "text": "Click <b>Ping</b> again — now that both PCs share a subnet, they should reach each other."
+    },
+    {
+      "id": "L3-01",
+      "text": "Right-click the Router to open its command line."
+    },
+    {
+      "id": "L3-02",
+      "text": "Type <b>enable</b> (or click it in the <b>Commands</b> list and press <b>Run</b>) to enter Privileged EXEC mode. Most commands are locked until you do — it's how a real router keeps casual users from breaking its config. (Tip: rest your mouse on any command to see what it does.)"
+    },
+    {
+      "id": "L3-03",
+      "text": "Type <b>configure terminal</b> to enter Global Config — settings you make here apply to the whole router. A single port's own settings live one level deeper, inside Interface Config."
+    },
+    {
+      "id": "L3-04",
+      "text": "Type <b>interface eth0</b> to configure the first port. (Tip: press <key>Tab</key> to auto-complete, or click the command in the <b>Commands</b> list.)"
+    },
+    {
+      "id": "L3-05",
+      "text": "Type <b>end</b> to jump back to Privileged EXEC. You've now walked the whole map: User EXEC → Privileged EXEC → Global Config → Interface Config."
+    },
+    {
+      "id": "L3-06",
+      "text": "<b>Checkpoint</b> — no outlines this time. You're back in Privileged EXEC — get the Router into <b>interface eth1</b>'s configuration mode on your own."
+    },
+    {
+      "id": "L4-01",
+      "text": "Place a Router to bridge the two subnets you're about to create."
+    },
+    {
+      "id": "L4-02",
+      "text": "Your Router has to be wired into both subnets before it can bridge them. Click <b>Cable</b> to start the first connection."
+    },
+    {
+      "id": "L4-03",
+      "text": "One subnet wired! Click <b>Cable</b> again for the second — this time from the Router to the other Switch."
+    },
+    {
+      "id": "L4-04",
+      "text": "Click the <b>Router</b> — that's where this cable starts."
+    },
+    {
+      "id": "L4-05",
+      "text": "Its free ports pop up — click one (like <b>eth{n}</b>) to plug the cable into the {device}.",
+      "vars": {
+        "n": [
+          "0",
+          "1",
+          "2",
+          "3",
+          "4",
+          "5"
+        ],
+        "device": [
+          "Router",
+          "Switch"
+        ]
+      }
+    },
+    {
+      "id": "L4-06",
+      "text": "That {device} has no free port left. Click an empty spot to close its list, then click the glowing <b>{expected}</b> instead.",
+      "vars": {
+        "device": [
+          "PC",
+          "Switch",
+          "Router"
+        ],
+        "expected": [
+          "Switch",
+          "Router"
+        ]
+      }
+    },
+    {
+      "id": "L4-07",
+      "text": "Now pick a free port on the {device} the same way to complete the cable.",
+      "vars": {
+        "device": [
+          "Router",
+          "Switch",
+          "PC"
+        ]
+      }
+    },
+    {
+      "id": "L4-08",
+      "text": "Now click the <b>Router</b> to finish the connection."
+    },
+    {
+      "id": "L4-09",
+      "text": "Now click the glowing <b>Switch</b> to finish the connection."
+    },
+    {
+      "id": "L4-10",
+      "text": "Now click a <b>Switch</b> to finish the connection."
+    },
+    {
+      "id": "L4-11",
+      "text": "Right-click the Router to open its CLI. Type <b>interface eth{n}</b>, then <b>ip address 192.168.1.1 255.255.255.0</b> and <b>no shutdown</b> to set up your first subnet.",
+      "vars": {
+        "n": [
+          "0",
+          "1",
+          "2"
+        ]
+      }
+    },
+    {
+      "id": "L4-12",
+      "text": "Now set up the second subnet: <b>interface eth{n}</b>, then <b>ip address 192.168.2.1 255.255.255.0</b> and <b>no shutdown</b> — a different subnet than the first interface.",
+      "vars": {
+        "n": [
+          "0",
+          "1",
+          "2"
+        ]
+      }
+    },
+    {
+      "id": "L4-13",
+      "text": "Every PC only knows how to reach devices on its own subnet directly — same network address, same mask. Anything outside that subnet is unreachable on its own.",
+      "note": "Concept card: Default Gateways (1/4)"
+    },
+    {
+      "id": "L4-14",
+      "text": "That's what a <b>default gateway</b> is for: a router interface sitting on the PC's own subnet, responsible for forwarding traffic bound for anywhere else.",
+      "note": "Concept card: Default Gateways (2/4)"
+    },
+    {
+      "id": "L4-15",
+      "text": "The Router interfaces you just configured <b>are</b> the gateways for their subnets. When you address each PC next, its mask decides what's \"local\" — everything else quietly routes through the Router instead.",
+      "note": "Concept card: Default Gateways (3/4)"
+    },
+    {
+      "id": "L4-16",
+      "text": "Concretely: <b>interface eth{a}</b> → <b>ip address 192.168.1.1 255.255.255.0</b> made 192.168.1.1 the gateway for that subnet — address a PC there like <b>192.168.1.10 255.255.255.0</b>. Same for eth{b}: 192.168.2.1 is the gateway for a PC addressed like <b>192.168.2.10 255.255.255.0</b>.",
+      "cases": [
+        {
+          "a": "0",
+          "b": "1"
+        },
+        {
+          "a": "0",
+          "b": "2"
+        },
+        {
+          "a": "1",
+          "b": "2"
+        }
+      ],
+      "note": "Concept card: Default Gateways (4/4), with the suggested addresses"
+    },
+    {
+      "id": "L4-17",
+      "text": "Concretely: the <b>ip address</b> command you ran on each interface is exactly what made it a gateway — that same address is what you'll enter as each PC's gateway next.",
+      "note": "Concept card: Default Gateways (4/4), fallback"
+    },
+    {
+      "id": "L4-18",
+      "text": "Right-click a PC to open its address popup, then give the two PCs IPs matching the Router's two subnets — one PC on <b>192.168.1.x</b> (eth{a}), the other on <b>192.168.2.x</b> (eth{b}).",
+      "cases": [
+        {
+          "a": "0",
+          "b": "1"
+        },
+        {
+          "a": "0",
+          "b": "2"
+        },
+        {
+          "a": "1",
+          "b": "2"
+        }
+      ]
+    },
+    {
+      "id": "L4-19",
+      "text": "Click <b>Ping</b>, then pick the two PCs to confirm they can reach each other through the Router."
+    },
+    {
+      "id": "L4-20",
+      "text": "Click <b>Send Packet</b>, choose a type, then click the two PCs. <b>HTTP Request</b> is instant; <b>File Transfer</b> carries a bigger, slower payload. Press Enter to commit, then click <b>Run Network</b> to send real data across the Router."
+    },
+    {
+      "id": "L11-01",
+      "text": "So far, every subnet you've made has used the same size mask for every department — one /24 each, no matter how many hosts it actually needed.",
+      "note": "Concept card: VLSM (1/4)"
+    },
+    {
+      "id": "L11-02",
+      "text": "This time, all three departments have to share ONE block: <b>192.168.1.0/24</b>. You'll carve it into three pieces instead of getting a fresh block each.",
+      "note": "Concept card: VLSM (2/4)"
+    },
+    {
+      "id": "L11-03",
+      "text": "Each department needs a different amount of room — one needs space for 4 hosts, one for 14, one for 30. Giving all three an identical mask would either waste addresses or not fit — that's what VLSM (Variable Length Subnet Masking) solves: sizing each piece to fit what it's actually for.",
+      "note": "Concept card: VLSM (3/4)"
+    },
+    {
+      "id": "L11-04",
+      "text": "Pick a mask for each department that's big enough for its own requirement, keep all three inside that one /24, and make sure none of their address ranges overlap.",
+      "note": "Concept card: VLSM (4/4)"
+    },
+    {
+      "id": "W-01",
+      "text": "That second click landed on (or right next to) your first one, so the table would be too small to hold anything.\n\nClick a corner further away to size it — two separate clicks, not a double-click.",
+      "note": "Warning: Table Too Small"
+    }
+  ]
+}

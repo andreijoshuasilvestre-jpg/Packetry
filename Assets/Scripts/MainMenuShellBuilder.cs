@@ -4,7 +4,7 @@ using TMPro;
 
 /// <summary>
 /// Builds the static main-menu shell — logo + the fixed row of menu buttons
-/// (Play/Tutorial/Settings/Feedback/Skip Tutorial (Dev)) — as a flat,
+/// (Play/Settings/Feedback/Quit) — as a flat,
 /// undistorted layout under a Screen Space - Overlay canvas (no perspective
 /// tilt, no cursor-parallax drift), so it renders identically in the Scene
 /// view and in Play without needing a camera. Pure structure: assigns
@@ -26,7 +26,7 @@ public static class MainMenuShellBuilder
     const float MenuMargin  = 210f; // shared left/right breathing room for the whole menu block (logo + buttons)
     const float ButtonGap   = 36f;
 
-    static readonly string[] ButtonOrder = { "Play", "Tutorial", "Settings", "Feedback", "Skip Tutorial (Dev)" };
+    static readonly string[] ButtonOrder = { "Play", "Settings", "Feedback", "Quit" };
 
     /// <summary>Builds the MenuRoot hierarchy under `parent` and returns its view.</summary>
     public static MainMenuShellView Build(RectTransform parent, TMP_FontAsset font, Color textColor)
@@ -41,7 +41,6 @@ public static class MainMenuShellBuilder
         rootRt.pivot     = new Vector2(0.5f, 0.5f);
 
         var view = rootGo.AddComponent<MainMenuShellView>();
-        view.Slide = rootGo.AddComponent<SlidePanel>();
 
         BuildLogo(rootRt, view);
         BuildButtons(rootRt, font, textColor, view);
@@ -67,6 +66,19 @@ public static class MainMenuShellBuilder
         anchorRt.anchoredPosition = new Vector2(logoX, 0f);
         anchorRt.sizeDelta        = new Vector2(LogoWidth, height);
 
+        var revealGroup = anchorGo.AddComponent<CanvasGroup>();
+        revealGroup.alpha = 0f;
+
+        // Drives the logo's actual on/off-screen motion for the level-select
+        // transition (MainMenuBootstrap.PlayMenuExit/PlayMenuEnter) — slides
+        // left, clear of frame, since the logo lives at the screen's left
+        // edge. Separate from revealGroup/the glow-pop above, which is only
+        // ever used for the one-time first-appearance reveal — the two never
+        // run at the same time, so they don't fight over anchorGo's transform.
+        var logoSlide = anchorGo.AddComponent<SlidePanel>();
+        logoSlide.Configure(SlideEdge.Left, LogoWidth + MenuMargin);
+        anchorGo.AddComponent<SlideTrail>(); // pixelated white "wind" streaks while it slides — see SlideTrail
+
         var visualGo = new GameObject("Visual", typeof(RectTransform));
         visualGo.transform.SetParent(anchorGo.transform, false);
         var vrt = visualGo.GetComponent<RectTransform>();
@@ -74,13 +86,47 @@ public static class MainMenuShellBuilder
         vrt.anchorMax = Vector2.one;
         vrt.offsetMin = Vector2.zero;
         vrt.offsetMax = Vector2.zero;
+        vrt.localScale = Vector3.one * MenuRevealFlash.StartScale;
 
-        var img = visualGo.AddComponent<Image>();
+        // Same glow language as a button's own click flash (see
+        // MenuButtonFX/MenuRevealFlash) — first child of Visual (renders
+        // behind the "Image" sibling added below), same Glow-then-Background
+        // ordering CreateMenuButton uses, so it inherits and gets compensated
+        // for Visual's own reveal-pop scale rather than needing its own.
+        var glowGo = new GameObject("Glow", typeof(RectTransform));
+        glowGo.transform.SetParent(visualGo.transform, false);
+        var glowImg = glowGo.AddComponent<Image>();
+        // Sprite assigned at runtime (MainMenuBootstrap), not here — same
+        // reason CreateMenuButton's own Glow leaves its sprite for
+        // MenuButtonFX.Init() to assign: RadialGlowSprite.Get() returns a
+        // shared, non-readable runtime texture that MainMenuUIBaker's
+        // PersistGeneratedSprites can't save into the baked prefab.
+        glowImg.color  = new Color(0f, 0f, 0f, 0f);
+        glowImg.raycastTarget = false;
+        var grt = glowGo.GetComponent<RectTransform>();
+        grt.anchorMin        = new Vector2(0.5f, 0.5f);
+        grt.anchorMax        = new Vector2(0.5f, 0.5f);
+        grt.pivot            = new Vector2(0.5f, 0.5f);
+        grt.anchoredPosition = Vector2.zero;
+        grt.sizeDelta        = new Vector2(LogoWidth * 1.15f, height * 1.8f);
+
+        var imageGo = new GameObject("Image", typeof(RectTransform));
+        imageGo.transform.SetParent(visualGo.transform, false);
+        var irt = imageGo.GetComponent<RectTransform>();
+        irt.anchorMin = Vector2.zero;
+        irt.anchorMax = Vector2.one;
+        irt.offsetMin = Vector2.zero;
+        irt.offsetMax = Vector2.zero;
+
+        var img = imageGo.AddComponent<Image>();
         img.sprite = sprite;
         img.preserveAspect = true;
         img.raycastTarget = false;
 
-        view.LogoVisual = vrt;
+        view.LogoVisual      = vrt;
+        view.LogoRevealGroup = revealGroup;
+        view.LogoGlow        = glowImg;
+        view.LogoSlide       = logoSlide;
     }
 
     static void BuildButtons(RectTransform root, TMP_FontAsset font, Color textColor, MainMenuShellView view)
@@ -121,11 +167,10 @@ public static class MainMenuShellBuilder
 
             switch (label)
             {
-                case "Play":                 view.Play         = refs; break;
-                case "Tutorial":              view.Tutorial     = refs; break;
-                case "Settings":              view.Settings     = refs; break;
-                case "Feedback":              view.Feedback     = refs; break;
-                case "Skip Tutorial (Dev)":   view.SkipTutorial = refs; break;
+                case "Play":      view.Play     = refs; break;
+                case "Quit":      view.Quit     = refs; break;
+                case "Settings":  view.Settings = refs; break;
+                case "Feedback":  view.Feedback = refs; break;
             }
         }
     }
@@ -142,6 +187,27 @@ public static class MainMenuShellBuilder
         rt.anchoredPosition = anchoredPos;
         rt.sizeDelta        = new Vector2(0f, height);
 
+        // Starts invisible/scaled down — MainMenuBootstrap's first-appearance
+        // sequence reveals each button one at a time via MenuButtonFX.
+        // PlayRevealIn() (see MenuRevealFlash) instead of it being visible
+        // from frame one.
+        var revealGroup = go.AddComponent<CanvasGroup>();
+        revealGroup.alpha = 0f;
+
+        // Drives this button's actual on/off-screen motion for the
+        // level-select transition (MainMenuBootstrap.PlayMenuExit/
+        // PlayMenuEnter) — slides right, clear of frame, since the button
+        // stack lives at the screen's right edge. Separate from revealGroup
+        // above, which is only ever used for the one-time first-appearance
+        // reveal.
+        var slide = go.AddComponent<SlidePanel>();
+        slide.Configure(SlideEdge.Right, ButtonWidth + MenuMargin);
+        // Shorter/tighter than the logo's own default trail (see
+        // SlideTrail.Configure) — a button is a much smaller element, and
+        // its streaks read better scaled down rather than matching the
+        // logo's full-size trail.
+        go.AddComponent<SlideTrail>().Configure(0.45f);
+
         var visualGo = new GameObject("Visual", typeof(RectTransform));
         visualGo.transform.SetParent(go.transform, false);
         var vrt = visualGo.GetComponent<RectTransform>();
@@ -149,6 +215,7 @@ public static class MainMenuShellBuilder
         vrt.anchorMax = Vector2.one;
         vrt.offsetMin = Vector2.zero;
         vrt.offsetMax = Vector2.zero;
+        vrt.localScale = Vector3.one * MenuRevealFlash.StartScale;
 
         // Glow is a child of Visual (not a sibling) so hand-moving/resizing
         // Visual in the Editor carries the glow along with it. First child
@@ -211,9 +278,10 @@ public static class MainMenuShellBuilder
         fx.normalSprite    = normalSprite;
         fx.hoverSprite     = hoverSprite;
         fx.glowColor       = GameTheme.ElectricBlue;
+        fx.revealGroup     = revealGroup;
         // Fx.Init() and Button.onClick wiring happen in MainMenuBootstrap,
         // once this shell lives under a real Canvas — see MainMenuShellView.
 
-        return new MenuButtonRefs { Button = btn, Fx = fx, VisualRect = vrt };
+        return new MenuButtonRefs { Button = btn, Fx = fx, VisualRect = vrt, Slide = slide };
     }
 }

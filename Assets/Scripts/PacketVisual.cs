@@ -22,7 +22,7 @@ public static class PacketVisual
         public float  Radius;    // orb diameter, same sizing convention as PingPacketEffect.OrbRadius
         public Sprite Icon;
         public float  Speed;     // world units / second
-        public int    CapWeight; // cost against a cable's in-flight cap
+        public PCMonitor.ScreenGlyph ScreenGlyph; // what a PC's monitor shows while sending/receiving this type — the same shape as Icon
     }
 
     static readonly Dictionary<PacketType, Profile> Profiles = new()
@@ -30,17 +30,17 @@ public static class PacketVisual
         [PacketType.HttpRequest] = new Profile
         {
             Radius = 0.075f, Icon = GridGlobeIconBuilder.GetSprite(Color.white),
-            Speed = 1.6f, CapWeight = 1,
+            Speed = 1.6f, ScreenGlyph = PCMonitor.ScreenGlyph.Globe,
         },
         [PacketType.HttpResponse] = new Profile
         {
             Radius = 0.075f, Icon = GridGlobeIconBuilder.GetSprite(Color.white),
-            Speed = 1.6f, CapWeight = 1,
+            Speed = 1.6f, ScreenGlyph = PCMonitor.ScreenGlyph.Globe,
         },
         [PacketType.FileTransfer] = new Profile
         {
             Radius = 0.10f, Icon = FolderIconBuilder.GetSprite(Color.white),
-            Speed = 0.8f, CapWeight = 2,
+            Speed = 0.8f, ScreenGlyph = PCMonitor.ScreenGlyph.Folder,
         },
     };
 
@@ -63,9 +63,9 @@ public static class PacketVisual
     static readonly Dictionary<Texture, Material> s_iconMaterials = new();
 
     public static float SpeedFor(PacketType type)     => Profiles[type].Speed;
-    public static int   CapWeightFor(PacketType type) => Profiles[type].CapWeight;
     public static Sprite IconFor(PacketType type)      => Profiles[type].Icon;
     public static Color ColorFor(PacketType type)      => TypeColors[type];
+    public static PCMonitor.ScreenGlyph ScreenGlyphFor(PacketType type) => Profiles[type].ScreenGlyph;
 
     public static Transform Create(PacketType type, Color tint, Transform parent)
     {

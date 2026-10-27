@@ -21,8 +21,15 @@ using TMPro;
 public static class LevelSelectShellBuilder
 {
     const string SpriteFolder = "MainMenuUI/";
-    const float ViewportWidth  = 560f;
-    const float ViewportHeight = 520f;
+    public const float CardWidth = 820f; // widened again (was 480 -> 560 -> 640) so longer level titles/card labels fit without shrinking as much
+    // Horizontal gap between each card edge and the viewport's RectMask2D.
+    // Cards scale up on hover (MenuButtonFX.hoverScale 1.06) and on click
+    // (its 1.12 bounce pop); without this margin, a card that fills the full
+    // viewport width gets its sides clipped whenever it grows. 50 covers the
+    // click peak: 820 * 0.12 / 2 = ~49px per side.
+    public const int   CardSideInset = 50;
+    const float ViewportWidth  = CardWidth + CardSideInset * 2;
+    const float ViewportHeight = 560f; // a little taller than the old 520, to give the now-taller (wider-aspect) cards some breathing room
     const float CardSpacing    = 40f;
 
     static readonly Vector2 DescPanelSize = new Vector2(720f, 440f);
@@ -51,7 +58,7 @@ public static class LevelSelectShellBuilder
 
         var view = panel.AddComponent<LevelSelectShellView>();
         panel.AddComponent<LevelSelectManager>();
-        view.PanelSlide = panel.AddComponent<SlidePanel>();
+        view.PanelSlide = panel.AddComponent<ZoomPanel>();
 
         BuildTitle(panelRt, font, textColor);
 
@@ -66,6 +73,16 @@ public static class LevelSelectShellBuilder
             containerBorderThickness, containerChamfer, containerPixelScale);
         BuildCarousel(panelRt, view);
         BuildDescriptionPopup(panelRt, font, textColor, containerFill, containerBorder, containerTrim, view);
+
+        // Starts inactive — LevelSelectManager.Build() also does this once it
+        // actually wires the panel up (see its own doc comment), but that
+        // only ever runs at real Play-mode Awake(). Without also deactivating
+        // it here, the baked prefab itself (and any pre-placed scene
+        // instance of it, or a runtime Instantiate() in the brief window
+        // before Build() runs) sits active-by-default — visible behind the
+        // main menu in the Editor without even pressing Play, or as a
+        // one-frame flash at runtime.
+        panel.SetActive(false);
 
         return view;
     }
@@ -150,10 +167,11 @@ public static class LevelSelectShellBuilder
         contentRt.sizeDelta        = Vector2.zero;
 
         var layout = contentGo.AddComponent<VerticalLayoutGroup>();
-        // Top/bottom padding depends on how many levels there actually are
-        // (see LevelSelectManager.RefreshCards, which recomputes this once it
-        // knows the live level count) — start with a neutral placeholder.
-        layout.padding             = new RectOffset(0, 0, 20, 20);
+        // Top/bottom padding depends on the live card/header layout (see
+        // LevelSelectManager.RefreshCards, which recomputes it so the first
+        // and last card can reach the viewport's center) — start with a
+        // neutral placeholder.
+        layout.padding             = new RectOffset(CardSideInset, CardSideInset, 20, 20);
         layout.spacing             = CardSpacing;
         layout.childAlignment      = TextAnchor.UpperCenter;
         layout.childControlWidth   = true;
@@ -265,15 +283,25 @@ public static class LevelSelectShellBuilder
         var descBodyTmp = bodyGo.AddComponent<TextMeshProUGUI>();
         descBodyTmp.font               = font;
         descBodyTmp.fontSize           = 22;
+        // Only ever shrinks for a description longer than today's longest
+        // (5 lines at 22 — Levels 7/9/11) — a LevelCatalog edit then gets
+        // slightly smaller text instead of spilling into the buttons.
+        descBodyTmp.enableAutoSizing   = true;
+        descBodyTmp.fontSizeMin        = 16;
+        descBodyTmp.fontSizeMax        = 22;
         descBodyTmp.color              = new Color(0.88f, 0.92f, 0.97f, 1f);
         descBodyTmp.alignment          = TextAlignmentOptions.Top;
         descBodyTmp.enableWordWrapping = true;
+        // Top-anchored like the rows above it, starting a clear gap below
+        // the icon row (-124 - 56 = -180) — it used to be center-anchored,
+        // which put its first line at -165, up inside the icons. Ends above
+        // the Cancel/Play row (top edge at 440 - 32 - 64 = 344 from the top).
         var bodyRt = bodyGo.GetComponent<RectTransform>();
-        bodyRt.anchorMin        = new Vector2(0.5f, 0.5f);
-        bodyRt.anchorMax        = new Vector2(0.5f, 0.5f);
-        bodyRt.pivot            = new Vector2(0.5f, 0.5f);
-        bodyRt.anchoredPosition = new Vector2(0f, -30f);
-        bodyRt.sizeDelta        = new Vector2(DescPanelSize.x - 100f, 170f);
+        bodyRt.anchorMin        = new Vector2(0.5f, 1f);
+        bodyRt.anchorMax        = new Vector2(0.5f, 1f);
+        bodyRt.pivot            = new Vector2(0.5f, 1f);
+        bodyRt.anchoredPosition = new Vector2(0f, -192f);
+        bodyRt.sizeDelta        = new Vector2(DescPanelSize.x - 100f, 140f);
 
         var cancelRefs = CreateStaticButton(popupGo.transform, "CANCEL", DescButtonWidth, DescButtonHeight, font, textColor);
         var cancelRt = cancelRefs.Button.GetComponent<RectTransform>();
@@ -289,13 +317,15 @@ public static class LevelSelectShellBuilder
         playRt.pivot            = new Vector2(0.5f, 0f);
         playRt.anchoredPosition = new Vector2(DescButtonGapFromCenter, 32f);
 
-        var descSlide = popupGo.AddComponent<SlidePanel>();
-        descSlide.Configure(SlideEdge.Bottom, 260f);
+        // Its arrival glow (PanelArrivalGlow) is added later, at runtime, by
+        // LevelSelectManager.Build — its additive material and generated ring
+        // sprite can't survive being baked into the prefab.
+        var descZoom = popupGo.AddComponent<ZoomPanel>();
 
         descDim.SetActive(false);
 
         view.DescDim         = descDim;
-        view.DescSlide       = descSlide;
+        view.DescZoom        = descZoom;
         view.DescTitleTmp    = descTitleTmp;
         view.DescCategoryTmp = descCategoryTmp;
         view.DescBodyTmp     = descBodyTmp;

@@ -2,9 +2,12 @@ using UnityEngine;
 
 /// <summary>
 /// World-space "look here" beacon — a Warframe star-chart-node-style pulse,
-/// plus a small floating arrow bobbing above the target pointing straight
-/// down at it (the arrow just disambiguates exactly which point the pulse is
-/// centered on; the pulse itself is what actually draws the eye).
+/// plus a small pixel-art mouse hovering just above the target, pressing the
+/// button the player should use there (see MouseGesture: a left/right click,
+/// press-and-hold where a drag starts, let-go where it ends). Each press is
+/// timed to send out one of the pulse's rings, so the spot reads as "click
+/// here" rather than a bare "look here" — the pulse is still what actually
+/// draws the eye.
 ///
 /// Two pulse styles, chosen per Show() call:
 ///  - Generic (no device given): two flat circular rings on the ground/table
@@ -18,7 +21,7 @@ using UnityEngine;
 ///    actually sells "here's the object", the dim fill just keeps its shape
 ///    legible underneath.
 ///
-/// Billboards the arrow to face the main camera every frame — the isometric
+/// Billboards the mouse to face the main camera every frame — the isometric
 /// camera's yaw/pitch/zoom are all player-adjustable (see IsometricCamera),
 /// so a fixed rotation would drift out of alignment the moment the player
 /// rotated or zoomed. Runs in LateUpdate (not Update) so the camera read here
@@ -31,10 +34,8 @@ using UnityEngine;
 /// blocks the ground/table raycasts DragDropManager/TableManager read
 /// clicks from.
 /// </summary>
-public class WorldPulseMarker : MonoBehaviour
+public class WorldPulseMarker : MonoBehaviour, IScreenOccupant
 {
-    private static Texture2D s_arrowTexture;
-    private static Texture2D s_ringTexture;
 
     // Vivid yellow by default (general "drop/click here" marker) — saturated
     // rather than a warm-gold tint specifically so it reads clearly against
@@ -54,9 +55,9 @@ public class WorldPulseMarker : MonoBehaviour
     // game is calibrated the same way rather than drifting apart.
     const float GlowMultiplier = HologramMaterial.GlowMultiplier;
 
-    // A gentler boost than the arrow's own GlowMultiplier — the pulse (a
+    // A gentler boost than the mouse button's own GlowMultiplier — the pulse (a
     // ring or a whole scaled-up device echo) covers far more screen area
-    // than the small arrow glyph, so the same 2.2x bloom boost at that scale
+    // than the small mouse glyph, so the same 2.2x bloom boost at that scale
     // read as overwhelming/eye-straining rather than just eye-catching.
     // NOTE: pairing a low multiplier with a low max-alpha doesn't just look
     // calmer — Bloom reacts to the rendered pixel AFTER alpha blending, so
@@ -65,13 +66,19 @@ public class WorldPulseMarker : MonoBehaviour
     // various maxAlpha fields in the same ballpark when tuning.
     const float PulseGlowMultiplier = 1.6f;
 
-    [Header("Arrow")]
+    [Header("Mouse")]
     [SerializeField] private float pulseSpeed = 2.2f;
-    [SerializeField] private float minAlpha = 0.55f, maxAlpha = 0.95f;
-    [SerializeField] private float minScale = 0.92f, maxScale = 1.1f; // subtle heartbeat, on top of the bob
-    [SerializeField] private float arrowSize = 0.65f;   // world-space quad diameter
-    [SerializeField] private float hoverHeight = 0.3f;  // clearance above the target point, measured to the arrow's TIP (see LateUpdate)
-    [SerializeField] private float bobHeight = 0.08f;   // vertical bob amplitude, world units
+    [SerializeField] private float minAlpha = 0.8f, maxAlpha = 1f;
+    [SerializeField] private float mouseSize = 0.9f;    // world-space glyph height
+    [SerializeField] private float hoverHeight = 0.3f;  // clearance above the target point, measured to the mouse's BOTTOM edge (see LateUpdate)
+    [SerializeField] private float bobHeight = 0.03f;   // idle vertical bob amplitude, world units — small, the press is the real motion
+    [SerializeField] private float pressDip = 0.11f;    // how far the mouse pushes down toward the target while its button is pressed
+    // The body wears the marker color with a modest bloom boost (a pale body
+    // washed out against the light floor). The gesture's button is a darker
+    // shade of it between presses — so it already says WHICH button — and
+    // flares white-hot, with the full GlowMultiplier, on each press.
+    [SerializeField] private float bodyGlow = 1.5f;
+    [SerializeField, Range(0f, 1f)] private float buttonIdleShade = 0.5f;
 
     [Header("Generic pulse rings (no device)")]
     [SerializeField] private float ringMaxDiameter = 1.9f;
@@ -98,7 +105,7 @@ public class WorldPulseMarker : MonoBehaviour
     private const int PulseCount = 2; // staggered in phase so one is always mid-pulse
 
     // ── Spawn-in ──────────────────────────────────────────────────────────────
-    // The arrow drops in from above and eases to rest instead of just
+    // The mouse drops in from above and eases to rest instead of just
     // appearing in place, and its tint sweeps from a construction-blueprint
     // blue into its real target color as it lands — the same "blueprint
     // hardening into something solid" read ConstructionRevealEffect gives a
@@ -109,13 +116,19 @@ public class WorldPulseMarker : MonoBehaviour
     // can safely restart on every Show() call is a better fit than reusing a
     // one-shot effect built around an object that's never reused.
     [Header("Spawn")]
-    [SerializeField] private float dropHeight = 2.2f;    // world units above its resting height the arrow starts at
+    [SerializeField] private float dropHeight = 2.2f;    // world units above its resting height the mouse starts at
     [SerializeField] private float dropDuration = 0.45f; // seconds for the drop + blueprint-to-solid tint sweep
     private static readonly Color BlueprintTint = new Color(0.15f, 0.45f, 1f, 1f); // same blue family as ConstructionRevealEffect's default fill
 
     private Transform quad;
     private Renderer rend;
     private MaterialPropertyBlock block;
+    // The lit-button overlay — a child of the body quad (so it shares its
+    // position/rotation/scale exactly), its texture swapped per gesture.
+    private Renderer buttonRend;
+    private Material buttonMat;
+    private MaterialPropertyBlock buttonBlock;
+    private MouseGesture gesture;
 
     // Generic circular rings — always built, only shown when not in device mode.
     private Transform[] rings;
@@ -132,14 +145,19 @@ public class WorldPulseMarker : MonoBehaviour
     // outline doesn't need per-device-type geometry, just live bounds), only
     // shown in device mode.
     private LineRenderer[] borderLines;
+    // A wider black line under each border line — the same dark rim the
+    // mouse/ring glyphs carry (see MarkerGlyphs), so the wireframe still
+    // reads against a bright device or floor.
+    private LineRenderer[] borderOutlines;
+    [SerializeField] private float borderOutlineWidthMul = 2.6f;
 
     private bool deviceMode;
 
     private Camera cam;
-    private Vector3 basePos; // arrow/ring anchor — a device's VisualTopPoint(), or a raw ground/table point
+    private Vector3 basePos; // mouse/ring anchor — a device's VisualTopPoint(), or a raw ground/table point
     private float spawnTime;
     // Set by Show() when pointing at a device — re-read every LateUpdate (see
-    // TrackDevice) so the whole marker (arrow anchor + device echo position/
+    // TrackDevice) so the whole marker (mouse anchor + device echo position/
     // rotation) follows it live instead of freezing at wherever it was the
     // instant Show() was called, e.g. while the player is mid-drag on it.
     private NetworkDevice trackedDevice;
@@ -150,16 +168,29 @@ public class WorldPulseMarker : MonoBehaviour
         cam = Camera.main;
 
         var quadGo = GameObject.CreatePrimitive(PrimitiveType.Quad);
-        quadGo.name = "Arrow";
+        quadGo.name = "Mouse";
         quadGo.transform.SetParent(transform, false);
         Destroy(quadGo.GetComponent<Collider>()); // must never intercept placement raycasts
 
         rend = quadGo.GetComponent<Renderer>();
-        rend.sharedMaterial = MakeMaterial(GetArrowTexture());
+        rend.sharedMaterial = MakeMaterial(Mouse.Body.texture);
         rend.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
         quad = quadGo.transform;
-        quad.localScale = Vector3.one * arrowSize;
+        quad.localScale = Vector3.one * (mouseSize / Mouse.Span);
         block = new MaterialPropertyBlock();
+
+        var buttonGo = GameObject.CreatePrimitive(PrimitiveType.Quad);
+        buttonGo.name = "MouseButton";
+        buttonGo.transform.SetParent(quad, false);
+        Destroy(buttonGo.GetComponent<Collider>());
+        buttonRend = buttonGo.GetComponent<Renderer>();
+        buttonMat = MakeMaterial(Mouse.LeftButton.texture);
+        // Coplanar with the body, and Sprites/Default doesn't write depth — a
+        // later queue is what keeps it drawn on top instead of flickering.
+        buttonMat.renderQueue = rend.sharedMaterial.renderQueue + 1;
+        buttonRend.sharedMaterial = buttonMat;
+        buttonRend.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        buttonBlock = new MaterialPropertyBlock();
 
         rings = new Transform[PulseCount];
         ringRends = new Renderer[PulseCount];
@@ -181,22 +212,33 @@ public class WorldPulseMarker : MonoBehaviour
         ringBlock = new MaterialPropertyBlock();
 
         borderLines = new LineRenderer[PulseCount];
+        borderOutlines = new LineRenderer[PulseCount];
         for (int i = 0; i < PulseCount; i++)
         {
-            var lineGo = new GameObject($"DeviceBorder{i}");
-            lineGo.transform.SetParent(transform, false);
-            var lr = lineGo.AddComponent<LineRenderer>();
-            lr.useWorldSpace = true;
-            lr.loop = false;
-            lr.positionCount = BoxWireframePath.Length;
-            lr.widthMultiplier = borderWidth;
-            lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-            lr.material = MakeMaterial(null);
-            lr.gameObject.SetActive(false);
-            borderLines[i] = lr;
+            // Outline first, one sorting order below its colored line, so the
+            // two coincident transparent lines always draw black-under-yellow
+            // instead of flickering between orders.
+            borderOutlines[i] = MakeBorderLine($"DeviceBorderOutline{i}", borderWidth * borderOutlineWidthMul, 0);
+            borderLines[i] = MakeBorderLine($"DeviceBorder{i}", borderWidth, 1);
         }
 
         gameObject.SetActive(false);
+    }
+
+    LineRenderer MakeBorderLine(string name, float width, int sortingOrder)
+    {
+        var lineGo = new GameObject(name);
+        lineGo.transform.SetParent(transform, false);
+        var lr = lineGo.AddComponent<LineRenderer>();
+        lr.useWorldSpace = true;
+        lr.loop = false;
+        lr.positionCount = BoxWireframePath.Length;
+        lr.widthMultiplier = width;
+        lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        lr.material = MakeMaterial(null);
+        lr.sortingOrder = sortingOrder;
+        lr.gameObject.SetActive(false);
+        return lr;
     }
 
     static Material MakeMaterial(Texture2D tex)
@@ -220,81 +262,35 @@ public class WorldPulseMarker : MonoBehaviour
         return new Material(shader);
     }
 
-    static Texture2D GetArrowTexture()
-    {
-        if (s_arrowTexture != null) return s_arrowTexture;
-        s_arrowTexture = BakeTexture("WorldArrowMarker", (u, v) =>
-        {
-            // Downward-pointing chevron/arrowhead: half-width tapers linearly
-            // from wide at the top edge (v=1) to a point at the bottom (v=0,
-            // the tip nearest the target), with a soft anti-aliased edge
-            // instead of a hard-cut triangle.
-            float halfWidth = Mathf.Lerp(0.03f, 0.34f, v);
-            float edgeDist = Mathf.Abs(u) - halfWidth;
-            float alpha = Mathf.Clamp01(1f - edgeDist * 22f);
-            alpha *= Mathf.Clamp01((1.05f - v) * 6f); // fades the top edge too, reads as a glyph not a hard triangle
-            return alpha;
-        });
-        return s_arrowTexture;
-    }
+    // Pixel-art, black-outlined glyphs (see MarkerGlyphs) — the mouse drawn at
+    // the ping badges' own world-space cell size. Its texture carries a
+    // 1-cell outline ring around the glyph, so the quad is drawn
+    // 1 / Mouse.Span larger to keep the glyph itself at mouseSize tall; it's
+    // centered and fills the glyph's height, so its bottom edge sits
+    // mouseSize/2 below the quad's center.
+    static MouseGlyph Mouse => MarkerGlyphs.WorldMouse;
 
-    // Soft-edged ring band — the expanding pulse itself, scaled/faded per
-    // instance rather than baked as concentric rings in the texture. The
-    // falloff coefficient below controls band thickness (lower = thicker);
-    // 4.5 reads as a bold stroke instead of a hairline, closer to Warframe's
-    // own star-chart node rings than a hairline circle.
-    static Texture2D GetRingTexture()
-    {
-        if (s_ringTexture != null) return s_ringTexture;
-        s_ringTexture = BakeTexture("WorldPulseRing", (u, v) =>
-        {
-            float dist = Mathf.Sqrt(u * u + (v - 0.5f) * (v - 0.5f)) * 2f; // 0 at center, 1 at edge
-            return Mathf.Clamp01(1f - Mathf.Abs(dist - 0.8f) * 4.5f);
-        });
-        return s_ringTexture;
-    }
+    // Ring band — the expanding pulse itself, scaled/faded per instance
+    // rather than baked as concentric rings in the texture. A bold 3-cell
+    // stroke (closer to Warframe's own star-chart node rings than a
+    // hairline), black-rimmed on both edges so it still reads on a bright
+    // table or floor, where the yellow band alone washed out.
+    static Texture2D GetRingTexture() => MarkerGlyphs.RingTexture;
 
-    // Shared square-texture baker — samples `alphaAt(u, v)` (u centered on
-    // 0, v spanning 0..1) per texel, same idiom the ring/glow textures
-    // elsewhere in the game (HologramMaterial's grid, the old ground-ring
-    // texture) already use.
-    static Texture2D BakeTexture(string name, System.Func<float, float, float> alphaAt)
-    {
-        const int size = 64;
-        var tex = new Texture2D(size, size, TextureFormat.RGBA32, false)
-        {
-            name = name,
-            wrapMode = TextureWrapMode.Clamp,
-            filterMode = FilterMode.Bilinear,
-        };
-        var pixels = new Color32[size * size];
-        for (int y = 0; y < size; y++)
-        {
-            float v = y / (float)(size - 1);
-            for (int x = 0; x < size; x++)
-            {
-                float u = x / (float)(size - 1) - 0.5f;
-                float alpha = alphaAt(u, v);
-                pixels[y * size + x] = new Color(1f, 1f, 1f, alpha);
-            }
-        }
-        tex.SetPixels32(pixels);
-        tex.Apply(false, true);
-        return tex;
-    }
-
-    /// <summary>Shows the marker at a world position — pulse centered on it, arrow
-    /// hovering above it pointing straight down. worldPos is the arrow's own anchor
+    /// <summary>Shows the marker at a world position — pulse centered on it, mouse
+    /// hovering just above it acting out `gesture`. worldPos is the mouse's own anchor
     /// (a device's VisualTopPoint(), or a raw ground/table spot) — pass
     /// pointingAtDevice too when it's an already-placed device, so the pulse itself
     /// becomes a dim echo of that device's real model plus a fading wireframe border
     /// around its live bounds, instead of a generic circle.</summary>
-    public void Show(Vector3 worldPos, NetworkDevice pointingAtDevice = null)
+    public void Show(Vector3 worldPos, NetworkDevice pointingAtDevice = null, MouseGesture gesture = MouseGesture.Click)
     {
         basePos = worldPos;
         transform.position = basePos; // initial anchor; TrackDevice() below keeps it live if pointingAtDevice moves
-        spawnTime = Time.time; // drives both the arrow's drop-in and the pulse's fresh cycle
+        spawnTime = Time.time; // drives both the mouse's drop-in and the pulse's fresh cycle
         trackedDevice = pointingAtDevice;
+        this.gesture = gesture;
+        buttonMat.mainTexture = Mouse.Button(gesture).texture;
 
         deviceMode = pointingAtDevice != null;
         if (deviceMode)
@@ -304,6 +300,7 @@ public class WorldPulseMarker : MonoBehaviour
             {
                 rings[i].gameObject.SetActive(false);
                 borderLines[i].gameObject.SetActive(true);
+                borderOutlines[i].gameObject.SetActive(true);
             }
         }
         else
@@ -313,6 +310,7 @@ public class WorldPulseMarker : MonoBehaviour
             {
                 rings[i].gameObject.SetActive(true);
                 borderLines[i].gameObject.SetActive(false);
+                borderOutlines[i].gameObject.SetActive(false);
             }
         }
 
@@ -323,6 +321,43 @@ public class WorldPulseMarker : MonoBehaviour
 
     public void SetColor(Color c) => color = c;
     public void ResetColor() => color = defaultColor;
+
+    // ── Screen occupancy ──────────────────────────────────────────────────────
+    // Registered while shown, so the tutorial callout (see TutorialUIManager's
+    // placement solver) moves off a marker instead of covering the exact spot
+    // it's telling the player to click/drop on.
+
+    public OccupantLayer Layer => OccupantLayer.WorldGuide;
+
+    void OnEnable() => ScreenOccupancy.Register(this);
+    void OnDisable() => ScreenOccupancy.Unregister(this);
+
+    public void CollectScreenRects(System.Collections.Generic.List<Rect> into)
+    {
+        if (cam == null) cam = Camera.main;
+        if (cam == null) return;
+
+        // The ring's footprint on the surface (most of its visible expansion —
+        // it's nearly faded out by full diameter) up to the mouse's top, plus
+        // the tracked device's own bounds in device mode.
+        float r = ringMaxDiameter * 0.35f;
+        var box = new Bounds(basePos, Vector3.zero);
+        box.Encapsulate(basePos + new Vector3(-r, 0f, -r));
+        box.Encapsulate(basePos + new Vector3(r, hoverHeight + bobHeight + mouseSize, r));
+        if (deviceMode && trackedDevice != null) box.Encapsulate(ComputeDeviceBounds(trackedDevice));
+
+        bool any = false;
+        Vector2 min = Vector2.positiveInfinity, max = Vector2.negativeInfinity;
+        foreach (var corner in BoxCorners(box))
+        {
+            Vector3 sp = cam.WorldToScreenPoint(corner);
+            if (sp.z <= 0f) continue;
+            any = true;
+            min = Vector2.Min(min, sp);
+            max = Vector2.Max(max, sp);
+        }
+        if (any) into.Add(Rect.MinMaxRect(min.x, min.y, max.x, max.y));
+    }
 
     // ── Device echo ───────────────────────────────────────────────────────────
 
@@ -456,20 +491,26 @@ public class WorldPulseMarker : MonoBehaviour
         float landed = 1f - (1f - dropT) * (1f - dropT);
 
         float t = Mathf.Sin(Time.time * pulseSpeed) * 0.5f + 0.5f;
-        float currentArrowSize = arrowSize * Mathf.Lerp(minScale, maxScale, t);
 
-        // hoverHeight/bobHeight describe where the arrow's TIP (its pointed,
-        // bottom edge — see GetArrowTexture) should sit, not the quad's own
-        // center — quad.position is a flat quad's geometric center, so half
-        // of its own rendered size was hanging below that point and clipping
-        // through the ground/table plane underneath. Lifting the center by
-        // half the (currently pulsing) quad size keeps the tip pinned at the
-        // intended hover height regardless of the breathing scale.
-        float restingY = hoverHeight + Mathf.Lerp(-bobHeight, bobHeight, t);
+        // One press per ring (see MarkerGlyphs.GesturePress) — the cycle is
+        // the gap between two rings, measured from spawnTime the same way
+        // LoopT is, so u = 0 is exactly when a fresh ring leaves. Held off
+        // until the drop-in has landed, so the first press reads as a click
+        // rather than part of the fall.
+        float cycle = since / (ringLoopDuration / PulseCount);
+        float press = dropT < 1f ? 0f : MarkerGlyphs.GesturePress(gesture, cycle - Mathf.Floor(cycle));
+
+        // hoverHeight/bobHeight describe where the mouse's BOTTOM edge should
+        // sit, not the quad's own center — quad.position is a flat quad's
+        // geometric center, so half of its rendered size would otherwise hang
+        // below that point and clip through the ground/table plane underneath.
+        // Not scaled with a heartbeat like the old arrow was: the press dip
+        // toward the target is the motion now.
+        float restingY = hoverHeight + Mathf.Lerp(-bobHeight, bobHeight, t) - pressDip * press;
         float startY = restingY + dropHeight;
-        float tipY = Mathf.Lerp(startY, restingY, landed);
-        quad.position = basePos + Vector3.up * (tipY + currentArrowSize * 0.5f);
-        quad.localScale = Vector3.one * currentArrowSize;
+        float bottomY = Mathf.Lerp(startY, restingY, landed);
+        quad.position = basePos + Vector3.up * (bottomY + mouseSize * 0.5f);
+        quad.localScale = Vector3.one * (mouseSize / Mouse.Span); // glyph stays mouseSize tall; the extra is its outline ring
 
         // Blueprint-blue ghost hardening into the marker's real color as it
         // lands, and a touch more transparent while still "under
@@ -478,15 +519,22 @@ public class WorldPulseMarker : MonoBehaviour
         // Spawn header comment for why this is a tint blend rather than that
         // effect's shader-swap).
         Color spawnTint = Color.Lerp(BlueprintTint, color, landed);
-        float arrowAlpha = Mathf.Lerp(minAlpha, maxAlpha, t) * Mathf.Lerp(0.4f, 1f, landed);
-        block.SetColor("_Color", new Color(spawnTint.r * GlowMultiplier, spawnTint.g * GlowMultiplier, spawnTint.b * GlowMultiplier, arrowAlpha));
+        float mouseAlpha = Mathf.Lerp(minAlpha, maxAlpha, t) * Mathf.Lerp(0.4f, 1f, landed);
+        block.SetColor("_Color", new Color(spawnTint.r * bodyGlow, spawnTint.g * bodyGlow, spawnTint.b * bodyGlow, mouseAlpha));
         rend.SetPropertyBlock(block);
 
-        // Billboard toward the camera so the arrow reads correctly regardless
-        // of the player's current yaw/pitch/zoom.
+        Color button = Color.Lerp(spawnTint * buttonIdleShade, Color.white, press) * Mathf.Lerp(1f, GlowMultiplier, press);
+        buttonBlock.SetColor("_Color", new Color(button.r, button.g, button.b, mouseAlpha));
+        buttonRend.SetPropertyBlock(buttonBlock);
+
+        // Billboard toward the camera so the mouse reads correctly regardless
+        // of the player's current yaw/pitch/zoom. Looks AWAY from the camera:
+        // a default Quad's visible face is its local -Z, and facing the camera
+        // would show its back face — mirrored, which a symmetric arrow hid but
+        // would swap which of the mouse's buttons is lit.
         if (cam == null) cam = Camera.main;
         if (cam != null)
-            quad.rotation = Quaternion.LookRotation(cam.transform.position - quad.position, Vector3.up);
+            quad.rotation = Quaternion.LookRotation(quad.position - cam.transform.position, Vector3.up);
 
         // Two pulses staggered half a loop apart (phase offset 0.5) so
         // there's always at least one mid-expansion — the classic Warframe
@@ -550,10 +598,17 @@ public class WorldPulseMarker : MonoBehaviour
                 Vector3[] corners = BoxCorners(padded);
 
                 var lr = borderLines[i];
+                var outline = borderOutlines[i];
                 for (int p = 0; p < BoxWireframePath.Length; p++)
+                {
                     lr.SetPosition(p, corners[BoxWireframePath[p]]);
+                    outline.SetPosition(p, corners[BoxWireframePath[p]]);
+                }
 
                 float borderAlpha = Mathf.Lerp(borderMaxAlpha, 0f, loopT);
+                Color outlineColor = new Color(0f, 0f, 0f, borderAlpha);
+                outline.startColor = outlineColor;
+                outline.endColor = outlineColor;
                 Color borderColor = new Color(tint.r, tint.g, tint.b, borderAlpha);
                 lr.startColor = borderColor;
                 lr.endColor = borderColor;

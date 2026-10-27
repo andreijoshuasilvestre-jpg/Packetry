@@ -6,20 +6,22 @@ using TMPro;
 /// <summary>
 /// Builds and owns both Settings surfaces the game has:
 ///   - A full-screen page (OpenFullScreen), wired to MainMenuBootstrap's
-///     "Settings" button — covers the whole screen like the main menu itself.
+///     "Settings" button — same hand-off as Level Select: the menu slides
+///     out, then this panel zooms in over the main menu's own background
+///     (it has no backdrop of its own), and zooms back out on close.
 ///   - A floating dialog (OpenDialog), wired to NetworkUIManager's top-bar
 ///     "Settings" icon — a centered chamfered-plate panel over the running
 ///     level, same visual language as ConfirmDialogManager, that dims but
-///     doesn't hide the game behind it.
+///     doesn't hide the game behind it. Zooms in and plays the arrival glow
+///     (PanelArrivalGlow) the same way ConfirmDialogManager does.
 ///
 /// Both share the same content-building code (BuildAudioSection, etc.) so a
 /// new settings feature is added once and appears in both places. Sections
 /// are added incrementally, one feature at a time — see CLAUDE.md's workflow
 /// note — so this file starts with just Audio.
 ///
-/// Registers itself in DragDropManager's mutual-exclusion chain (see that
-/// class's doc comment) the same way CLIPanelManager does: every interactive
-/// manager's Update() checks SettingsPanelManager.Instance.IsOpen right
+/// Pauses gameplay input through InteractionMode.IsSuspended (alongside
+/// AnnotationLock): every interactive manager's Update() checks that right
 /// alongside CLIPanelManager.Instance.IsOpen.
 /// </summary>
 public class SettingsPanelManager : MonoBehaviour
@@ -41,28 +43,40 @@ public class SettingsPanelManager : MonoBehaviour
     static readonly Color32 PanelBorder = new Color32(36, 82, 130, 255);
     static readonly Color32 PanelTrim   = new Color32(5, 8, 13, 255);
 
-    static readonly Vector2 DialogPanelSize     = new Vector2(620f, 620f);
-    static readonly Vector2 FullScreenPanelSize = new Vector2(860f, 760f);
-
-    const float SlideDistance = 300f;
+    // Heights grew by ~160 to fit the new Camera section (header + 2 rows)
+    // added alongside Audio/Display/Subnet Colors without squeezing them, then
+    // by two rows (54 each) for Narration Volume and Tutorial Narration, then
+    // by 202 for Animation Speed (header + 3 rows). Taller than a 1080 canvas
+    // now — FitToScreen clamps the panel and the body scrolls.
+    static readonly Vector2 DialogPanelSize     = new Vector2(620f, 1090f);
+    static readonly Vector2 FullScreenPanelSize = new Vector2(860f, 1230f);
 
     // Row geometry shared by every settings control this panel ever builds.
     const float RowHeight    = 44f;
     const float RowSpacing   = 10f;
     const float LabelWidth   = 200f;
     const float SliderWidth  = 260f;
+    const float SliderMinWidth = 160f; // how far a slider bar may shrink in a narrow column (see MakeSliderRow)
     const float ValueWidth   = 60f;
+    const float ChoiceWidth    = 144f; // each button of a two-way switch row (see MakeToggleRow)
+    const float ChoiceMinWidth = 110f;
+    const float ChoiceHeight   = 36f;
+    static readonly Color ChoiceIdle = new Color(0.30f, 0.32f, 0.38f);
 
     TMP_FontAsset font;
 
     GameObject dialogRoot;
-    SlidePanel dialogSlide;
+    ZoomPanel dialogZoom;
+    PanelArrivalGlow dialogGlow;
     Transform dialogContent;
     Transform dialogSubnetList;
 
     GameObject fullScreenRoot;
+    ZoomPanel fullScreenZoom;
     Transform fullScreenContent;
     Transform fullScreenSubnetList;
+    System.Action fullScreenOnClosed;
+    bool fullScreenClosing;
 
     void Awake()
     {
@@ -90,23 +104,32 @@ public class SettingsPanelManager : MonoBehaviour
         dialogRoot.SetActive(true);
         RefreshControls();
         ForceRelayout(dialogContent);
-        dialogSlide.SlideIn();
+        dialogZoom.ZoomIn(dialogGlow.Play);
     }
 
     public void CloseDialog()
     {
         if (dialogRoot == null) return;
         SaveManager.Save(); // flush whatever was changed while it was open
-        dialogSlide.SlideOut(() => dialogRoot.SetActive(false));
+        dialogZoom.ZoomOut(() => dialogRoot.SetActive(false));
     }
 
-    /// <summary>Full-screen page — see MainMenuBootstrap's "Settings" button.</summary>
-    public void OpenFullScreen()
+    /// <summary>Full-screen page — see MainMenuBootstrap's "Settings" button.
+    /// Zooms the panel in; onClosed fires once CloseFullScreen's zoom-out has
+    /// finished and the page is hidden (MainMenuBootstrap slides the menu
+    /// back in from there, same as returning from Level Select).</summary>
+    public void OpenFullScreen(System.Action onClosed = null)
     {
-        if (fullScreenRoot == null) return;
+        // Not built yet (Start hasn't run) — hand straight back so the caller
+        // isn't left with its own screen hidden and nothing showing.
+        if (fullScreenRoot == null) { onClosed?.Invoke(); return; }
+
+        fullScreenOnClosed = onClosed;
+        fullScreenClosing  = false;
         fullScreenRoot.SetActive(true);
         RefreshControls();
         ForceRelayout(fullScreenContent);
+        fullScreenZoom.ZoomIn();
     }
 
     /// <summary>Unity's layout groups queue their rebuild for later in the frame
@@ -124,9 +147,16 @@ public class SettingsPanelManager : MonoBehaviour
 
     public void CloseFullScreen()
     {
-        if (fullScreenRoot == null) return;
+        if (fullScreenRoot == null || fullScreenClosing) return; // ignore repeat clicks on X while it's already zooming out
+        fullScreenClosing = true;
         SaveManager.Save();
-        fullScreenRoot.SetActive(false);
+        fullScreenZoom.ZoomOut(() =>
+        {
+            fullScreenRoot.SetActive(false);
+            var onClosed = fullScreenOnClosed;
+            fullScreenOnClosed = null;
+            onClosed?.Invoke();
+        });
     }
 
     // ── Dialog (in-game, floating) ───────────────────────────────────────────
@@ -167,16 +197,26 @@ public class SettingsPanelManager : MonoBehaviour
         dialogPanelRt.anchorMax = new Vector2(0.5f, 0.5f);
         dialogPanelRt.pivot     = new Vector2(0.5f, 0.5f);
         dialogPanelRt.sizeDelta = DialogPanelSize;
+        // 780 tall — taller than the canvas at high UI Scale. ClampSize, not
+        // Shrink: the panel stops at the screen margin but its text keeps
+        // growing with UI Scale, and the body scrolls (MakeContentContainer).
+        FitToScreen.Attach(panelGo, FitToScreen.FitMode.ClampSize);
 
-        MakeTitle(panelGo.transform, DialogPanelSize, 22);
+        MakeTitle(panelGo.transform, 22);
         MakeCloseButton(panelGo.transform, DialogPanelSize, CloseDialog);
-        dialogContent = MakeContentContainer(panelGo.transform, DialogPanelSize);
-        BuildAudioSection(dialogContent, out dialogMusicSlider, out dialogSfxSlider);
-        BuildDisplaySection(dialogContent, out dialogUiScaleSlider);
+        dialogContent = MakeContentContainer(panelGo.transform);
+        BuildAudioSection(dialogContent);
+        BuildDisplaySection(dialogContent);
+        BuildCameraSection(dialogContent);
+        BuildAnimationSection(dialogContent);
         dialogSubnetList = BuildSubnetSection(dialogContent, 150f);
 
-        dialogSlide = panelGo.AddComponent<SlidePanel>();
-        dialogSlide.Configure(SlideEdge.Bottom, SlideDistance);
+        // Same popup entrance as ConfirmDialogManager and the level
+        // description popup: zoom up from nothing, then the arrival glow once
+        // it's full size. Scale-only, so it doesn't fight FitToScreen's
+        // ClampSize (size-only) on the same panel.
+        dialogZoom = panelGo.AddComponent<ZoomPanel>();
+        dialogGlow = PanelArrivalGlow.Attach(panelGo, GameTheme.ElectricBlue);
     }
 
     // ── Full-screen (main menu) ──────────────────────────────────────────────
@@ -196,19 +236,11 @@ public class SettingsPanelManager : MonoBehaviour
 
         fullScreenRoot = canvasGo;
 
-        // Opaque backdrop covering the whole screen (matches the main menu's own
-        // background tone) rather than a translucent dim — this page fully
-        // replaces the menu visually instead of overlaying it, unlike the dialog.
-        var bgGo = new GameObject("Background");
-        bgGo.transform.SetParent(canvasGo.transform, false);
-        var bgImg = bgGo.AddComponent<Image>();
-        bgImg.color = new Color(0.055f, 0.07f, 0.11f, 1f);
-        var bgRt = bgGo.GetComponent<RectTransform>();
-        bgRt.anchorMin = Vector2.zero;
-        bgRt.anchorMax = Vector2.one;
-        bgRt.offsetMin = Vector2.zero;
-        bgRt.offsetMax = Vector2.zero;
-
+        // No backdrop of its own — the main menu's scrolling background
+        // (MainMenuCanvasBuilder, on the canvas underneath) shows through, the
+        // same way it does behind Level Select. The menu's logo/buttons have
+        // already slid out by the time this opens (see MainMenuBootstrap.
+        // OpenSettings), so there's nothing behind the panel to cover or click.
         var panelGo = new GameObject("Panel");
         panelGo.transform.SetParent(canvasGo.transform, false);
         var panelImg = panelGo.AddComponent<Image>();
@@ -221,18 +253,25 @@ public class SettingsPanelManager : MonoBehaviour
         panelRt.anchorMax = new Vector2(0.5f, 0.5f);
         panelRt.pivot     = new Vector2(0.5f, 0.5f);
         panelRt.sizeDelta = FullScreenPanelSize;
+        FitToScreen.Attach(panelGo, FitToScreen.FitMode.ClampSize); // 920 tall — see BuildDialog
 
-        MakeTitle(panelGo.transform, FullScreenPanelSize, 30);
+        MakeTitle(panelGo.transform, 30);
         MakeCloseButton(panelGo.transform, FullScreenPanelSize, CloseFullScreen);
-        fullScreenContent = MakeContentContainer(panelGo.transform, FullScreenPanelSize);
-        BuildAudioSection(fullScreenContent, out fullScreenMusicSlider, out fullScreenSfxSlider);
-        BuildDisplaySection(fullScreenContent, out fullScreenUiScaleSlider);
+        fullScreenContent = MakeContentContainer(panelGo.transform);
+        BuildAudioSection(fullScreenContent);
+        BuildDisplaySection(fullScreenContent);
+        BuildCameraSection(fullScreenContent);
+        BuildAnimationSection(fullScreenContent);
         fullScreenSubnetList = BuildSubnetSection(fullScreenContent, 260f);
+
+        // Scale-only, so it doesn't fight FitToScreen's ClampSize (size-only)
+        // on the same panel.
+        fullScreenZoom = panelGo.AddComponent<ZoomPanel>();
     }
 
     // ── Shared chrome ────────────────────────────────────────────────────────
 
-    void MakeTitle(Transform parent, Vector2 panelSize, int fontSize)
+    void MakeTitle(Transform parent, int fontSize)
     {
         var go = new GameObject("Title");
         go.transform.SetParent(parent, false);
@@ -244,12 +283,14 @@ public class SettingsPanelManager : MonoBehaviour
         tmp.color     = new Color(0.88f, 0.92f, 0.97f);
         tmp.text      = "SETTINGS";
 
+        // Stretched across the panel (60 in from each side) rather than sized
+        // from the authored panel width, so it follows FitToScreen's clamp.
         var rt = go.GetComponent<RectTransform>();
-        rt.anchorMin        = new Vector2(0.5f, 1f);
-        rt.anchorMax        = new Vector2(0.5f, 1f);
+        rt.anchorMin        = new Vector2(0f, 1f);
+        rt.anchorMax        = new Vector2(1f, 1f);
         rt.pivot            = new Vector2(0.5f, 1f);
         rt.anchoredPosition = new Vector2(0f, -24f);
-        rt.sizeDelta        = new Vector2(panelSize.x - 120f, 40f);
+        rt.sizeDelta        = new Vector2(-120f, 40f);
     }
 
     void MakeCloseButton(Transform parent, Vector2 panelSize, UnityEngine.Events.UnityAction onClick)
@@ -285,17 +326,51 @@ public class SettingsPanelManager : MonoBehaviour
     }
 
     /// <summary>Vertical stack every settings section (Audio, and whatever's added
-    /// after it) appends its rows to.</summary>
-    Transform MakeContentContainer(Transform parent, Vector2 panelSize)
+    /// after it) appends its rows to. Lives inside a scroll view filling the
+    /// panel below the title — at normal UI Scale everything fits and it never
+    /// scrolls, but once FitToScreen caps the panel at the screen edge the
+    /// still-growing rows overflow and scroll instead of getting cut off.</summary>
+    Transform MakeContentContainer(Transform parent)
     {
+        var scrollGo = new GameObject("ContentScroll", typeof(RectTransform));
+        scrollGo.transform.SetParent(parent, false);
+        var scrollRt = scrollGo.GetComponent<RectTransform>();
+        scrollRt.anchorMin = Vector2.zero;
+        scrollRt.anchorMax = Vector2.one;
+        scrollRt.offsetMin = new Vector2(50f, 40f);   // same 50-side / 40-bottom inset
+        scrollRt.offsetMax = new Vector2(-50f, -80f); // the fixed-size container had
+
+        var viewportGo = new GameObject("Viewport", typeof(RectTransform));
+        viewportGo.transform.SetParent(scrollGo.transform, false);
+        var viewportRt = viewportGo.GetComponent<RectTransform>();
+        viewportRt.anchorMin = Vector2.zero;
+        viewportRt.anchorMax = Vector2.one;
+        viewportRt.offsetMin = Vector2.zero;
+        viewportRt.offsetMax = Vector2.zero;
+        viewportGo.AddComponent<RectMask2D>();
+        // Invisible, but makes the gaps between rows a scroll/drag target too.
+        var viewportImg = viewportGo.AddComponent<Image>();
+        viewportImg.color = new Color(0f, 0f, 0f, 0f);
+
         var go = new GameObject("Content", typeof(RectTransform));
-        go.transform.SetParent(parent, false);
+        go.transform.SetParent(viewportGo.transform, false);
         var rt = go.GetComponent<RectTransform>();
-        rt.anchorMin        = new Vector2(0.5f, 1f);
-        rt.anchorMax        = new Vector2(0.5f, 1f);
+        rt.anchorMin        = new Vector2(0f, 1f);
+        rt.anchorMax        = new Vector2(1f, 1f);
         rt.pivot            = new Vector2(0.5f, 1f);
-        rt.anchoredPosition = new Vector2(0f, -80f);
-        rt.sizeDelta        = new Vector2(panelSize.x - 100f, panelSize.y - 120f);
+        rt.anchoredPosition = Vector2.zero;
+        rt.sizeDelta        = Vector2.zero; // see MakeScrollList — default (100,100) overflows a stretch
+
+        var fitter = go.AddComponent<ContentSizeFitter>();
+        fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+        var scrollRect = scrollGo.AddComponent<SmoothScrollRect>();
+        scrollRect.horizontal        = false;
+        scrollRect.vertical          = true;
+        scrollRect.movementType      = ScrollRect.MovementType.Clamped;
+        scrollRect.scrollSensitivity = 30f;
+        scrollRect.viewport          = viewportRt;
+        scrollRect.content           = rt;
 
         var vlg = go.AddComponent<VerticalLayoutGroup>();
         vlg.childAlignment      = TextAnchor.UpperCenter;
@@ -318,75 +393,186 @@ public class SettingsPanelManager : MonoBehaviour
     /// <summary>Re-reads saved values into every built control — called each time
     /// either surface opens, so a value changed via the other surface (or another
     /// session) shows correctly instead of a stale value from when this was built.
-    /// Each surface builds its own independent slider instances (see
-    /// BuildAudioSection), so both pairs are refreshed unconditionally rather than
-    /// tracking which surface is currently open — updating a hidden canvas's
-    /// slider is harmless and far simpler than keeping that in sync.
-    ///
-    /// Uses the plain .value setter, not SetValueWithoutNotify — the percentage
-    /// text next to each slider is only updated from its onValueChanged listener
-    /// (see MakeSliderRow), so SetValueWithoutNotify left it showing a stale
-    /// percentage whenever a value changed externally (caught via screenshot:
-    /// the UI Scale slider sat at 150% but its label still read "100%"). Calling
-    /// the onChanged handlers again when the value hasn't actually changed is
-    /// harmless — Slider itself no-ops in that case — and when it has changed,
-    /// re-running onChanged (e.g. AudioManager.SetVolume) is idempotent.</summary>
+    /// Each surface builds its own independent controls, and every control
+    /// registers its own refresh as it's built (see controlRefreshers), so both
+    /// surfaces are refreshed unconditionally rather than tracking which one is
+    /// open — updating a hidden canvas's controls is harmless and far simpler
+    /// than keeping that in sync.</summary>
     void RefreshControls()
     {
-        if (dialogMusicSlider != null) dialogMusicSlider.value = SaveManager.Settings.musicVolume;
-        if (dialogSfxSlider != null) dialogSfxSlider.value = SaveManager.Settings.sfxVolume;
-        if (fullScreenMusicSlider != null) fullScreenMusicSlider.value = SaveManager.Settings.musicVolume;
-        if (fullScreenSfxSlider != null) fullScreenSfxSlider.value = SaveManager.Settings.sfxVolume;
-
-        if (dialogUiScaleSlider != null) dialogUiScaleSlider.value = SaveManager.Settings.uiScale;
-        if (fullScreenUiScaleSlider != null) fullScreenUiScaleSlider.value = SaveManager.Settings.uiScale;
+        foreach (var refresh in controlRefreshers) refresh();
 
         RebuildSubnetRows(dialogSubnetList);
         RebuildSubnetRows(fullScreenSubnetList);
     }
 
-    // ── Audio section ────────────────────────────────────────────────────────
+    // One per built control, across both surfaces — each re-reads its own saved
+    // value (see RefreshControls). Registered by MakeSliderRow/MakeToggleRow
+    // rather than kept in per-surface fields: a single shared field once ended
+    // up owned by whichever surface built last (a real bug caught via
+    // screenshot: the dialog's sliders never refreshed).
+    readonly System.Collections.Generic.List<System.Action> controlRefreshers = new();
 
-    // Separate fields per surface — BuildAudioSection runs once for the dialog
-    // and once for the full-screen page, each producing its own Slider
-    // instances; a single shared field would just end up pointing at whichever
-    // surface happened to build last (a real bug caught via screenshot: the
-    // dialog's sliders never visually refreshed because these fields were
-    // silently owned by the full-screen page's sliders instead).
-    Slider dialogMusicSlider, dialogSfxSlider;
-    Slider fullScreenMusicSlider, fullScreenSfxSlider;
+    // ── Audio section ────────────────────────────────────────────────────────
 
     /// <summary>Called once per surface (dialog + full-screen) right after
     /// MakeContentContainer, building this feature's rows into that container.</summary>
-    void BuildAudioSection(Transform content, out Slider musicSlider, out Slider sfxSlider)
+    void BuildAudioSection(Transform content)
     {
         MakeSectionHeader(content, "AUDIO");
 
-        musicSlider = MakeSliderRow(content, "Music Volume", SaveManager.Settings.musicVolume,
+        MakeSliderRow(content, "Music Volume", () => SaveManager.Settings.musicVolume,
             v => MusicManager.Instance?.SetVolume(v));
-        sfxSlider = MakeSliderRow(content, "SFX Volume", SaveManager.Settings.sfxVolume,
+        MakeSliderRow(content, "SFX Volume", () => SaveManager.Settings.sfxVolume,
             v => AudioManager.Instance?.SetVolume(v));
+        MakeSliderRow(content, "Narration Volume", () => SaveManager.Settings.narrationVolume,
+            NarrationManager.SetVolume);
+        MakeToggleRow(content, "Tutorial Narration",
+            () => NarrationManager.Enabled, NarrationManager.SetEnabled);
     }
 
     // ── Display section (UI Scale) ──────────────────────────────────────────
-
-    Slider dialogUiScaleSlider, fullScreenUiScaleSlider;
 
     /// <summary>Accessibility-style "make everything bigger/smaller" slider —
     /// see UIScale's own doc comment for how this actually resizes UI (adjusting
     /// every registered CanvasScaler's reference resolution) without touching
     /// each manager's own layout code.</summary>
-    void BuildDisplaySection(Transform content, out Slider uiScaleSlider)
+    void BuildDisplaySection(Transform content)
     {
         MakeSectionHeader(content, "DISPLAY");
 
-        uiScaleSlider = MakeSliderRow(content, "UI Scale", SaveManager.Settings.uiScale,
+        MakeSliderRow(content, "UI Scale", () => SaveManager.Settings.uiScale,
             v =>
             {
                 SaveManager.Settings.uiScale = v;
                 UIScale.Apply();
             },
             minValue: 0.8f, maxValue: 1.5f);
+    }
+
+    // ── Camera section (zoom speed, camera/pan speed) ───────────────────────
+    // Multipliers on top of IsometricCamera's own base speeds, not raw values —
+    // same "1 = unchanged" convention as uiScale, so old saves default to
+    // exactly today's feel. The zoom *level* itself (IsometricCamera.cameraZoomDistance)
+    // isn't a slider here — it's saved automatically as the player scrolls
+    // (see IsometricCamera.FlushZoomSave), nothing to configure.
+
+    void BuildCameraSection(Transform content)
+    {
+        MakeSectionHeader(content, "CAMERA");
+
+        MakeSliderRow(content, "Zoom Speed", () => SaveManager.Settings.cameraZoomSpeedMultiplier,
+            v => SaveManager.Settings.cameraZoomSpeedMultiplier = v,
+            minValue: 0.5f, maxValue: 2f);
+
+        MakeSliderRow(content, "Camera Speed", () => SaveManager.Settings.cameraPanSpeedMultiplier,
+            v => SaveManager.Settings.cameraPanSpeedMultiplier = v,
+            minValue: 0.5f, maxValue: 2f);
+    }
+
+    // ── Animation Speed section ──────────────────────────────────────────────
+    // One multiplier per kind of animation (see AnimationSpeed), stepped in
+    // quarters from 1x to 3x — a stepper rather than a slider, since only
+    // those exact values mean anything. Each row explains on hover what it
+    // speeds up.
+
+    void BuildAnimationSection(Transform content)
+    {
+        MakeSectionHeader(content, "ANIMATION SPEED");
+
+        MakeStepperRow(content, "Packets", AnimationKind.Packets,
+            "How fast pings and packet transfers travel along the cables, and how quickly devices and PC screens react when one leaves or arrives.");
+        MakeStepperRow(content, "Building", AnimationKind.Build,
+            "How fast a device, table or cable you place builds itself in.");
+        MakeStepperRow(content, "Level Intro & Exit", AnimationKind.Level,
+            "How fast a level assembles when you enter it (floor, walls, starting devices, toolbar) and clears away when you leave or restart.");
+    }
+
+    /// <summary>Builds one "Label  [ &lt; ]  1.25x  [ &gt; ]" row stepping kind's
+    /// multiplier by AnimationSpeed.Step, each click saved straight away (one
+    /// click is one change — no drag to debounce, unlike MakeSliderRow). An
+    /// arrow at the end of the range greys out.</summary>
+    void MakeStepperRow(Transform parent, string label, AnimationKind kind, string explanation)
+    {
+        Transform row = MakeRow(parent, label);
+        HoverTooltip.Attach(row.Find("Label").gameObject, () => new TooltipContent
+        {
+            Title  = $"{label} speed",
+            Body   = explanation,
+            Footer = $"{AnimationSpeed.Label(AnimationSpeed.Min)} is normal speed, up to {AnimationSpeed.Label(AnimationSpeed.Max)}.",
+        });
+
+        Button down = MakeStepButton(row, "<");
+
+        var valueGo = new GameObject("Value", typeof(RectTransform));
+        valueGo.transform.SetParent(row, false);
+        valueGo.GetComponent<RectTransform>().sizeDelta = new Vector2(StepValueWidth, RowHeight);
+        FixedRowWidth(valueGo, StepValueWidth, StepValueWidth);
+        var valueTmp = valueGo.AddComponent<TextMeshProUGUI>();
+        valueTmp.font      = font;
+        valueTmp.fontSize  = 18;
+        valueTmp.fontStyle = FontStyles.Bold;
+        valueTmp.color     = new Color(0.88f, 0.92f, 0.97f);
+        valueTmp.alignment = TextAlignmentOptions.Center;
+
+        Button up = MakeStepButton(row, ">");
+
+        void Refresh()
+        {
+            float value = AnimationSpeed.Get(kind);
+            valueTmp.text = AnimationSpeed.Label(value);
+            SetStepUsable(down, value > AnimationSpeed.Min);
+            SetStepUsable(up, value < AnimationSpeed.Max);
+        }
+
+        void Change(int steps)
+        {
+            AnimationSpeed.Set(kind, AnimationSpeed.Get(kind) + steps * AnimationSpeed.Step);
+            SaveManager.Save();
+            Refresh();
+        }
+
+        down.onClick.AddListener(() => Change(-1));
+        up.onClick.AddListener(() => Change(1));
+        Refresh();
+        controlRefreshers.Add(Refresh);
+    }
+
+    const float StepButtonWidth = 44f;
+    const float StepValueWidth  = 80f;
+
+    Button MakeStepButton(Transform row, string text)
+    {
+        var go = new GameObject($"Step_{text}", typeof(RectTransform));
+        go.transform.SetParent(row, false);
+        go.GetComponent<RectTransform>().sizeDelta = new Vector2(StepButtonWidth, ChoiceHeight);
+        FixedRowWidth(go, StepButtonWidth, StepButtonWidth);
+        var img = go.AddComponent<Image>();
+        img.color = GameTheme.ElectricBlue;
+
+        var labelGo = new GameObject("Label", typeof(RectTransform));
+        labelGo.transform.SetParent(go.transform, false);
+        var labelRt = labelGo.GetComponent<RectTransform>();
+        labelRt.anchorMin = Vector2.zero;
+        labelRt.anchorMax = Vector2.one;
+        labelRt.offsetMin = labelRt.offsetMax = Vector2.zero;
+        var tmp = labelGo.AddComponent<TextMeshProUGUI>();
+        tmp.font      = font;
+        tmp.fontSize  = 20;
+        tmp.fontStyle = FontStyles.Bold;
+        tmp.color     = Color.white;
+        tmp.alignment = TextAlignmentOptions.Center;
+        tmp.text      = text;
+
+        // Mouse-only, like the subnet slot buttons — an Enter press must not
+        // keep stepping whichever arrow was clicked last.
+        return MakeMouseOnlyButton(go, img);
+    }
+
+    static void SetStepUsable(Button b, bool usable)
+    {
+        b.interactable = usable;
+        b.image.color = usable ? GameTheme.ElectricBlue : ChoiceIdle;
     }
 
     void MakeSectionHeader(Transform parent, string text)
@@ -411,41 +597,24 @@ public class SettingsPanelManager : MonoBehaviour
     /// single drag fires — see AudioManager/MusicManager.SetVolume's own note.
     /// minValue/maxValue default to a plain 0-1 fraction (volume sliders); the
     /// UI Scale slider passes a 0.8-1.5 range instead — the same "value*100%"
-    /// readout still reads correctly either way (1.0 -> "100%").</summary>
-    Slider MakeSliderRow(Transform parent, string label, float initialValue, System.Action<float> onChanged,
+    /// readout still reads correctly either way (1.0 -> "100%"). get reads the
+    /// saved value, now and on every RefreshControls.</summary>
+    void MakeSliderRow(Transform parent, string label, System.Func<float> get, System.Action<float> onChanged,
         float minValue = 0f, float maxValue = 1f)
     {
-        var rowGo = new GameObject($"Row_{label}", typeof(RectTransform));
-        rowGo.transform.SetParent(parent, false);
-        var rowRt = rowGo.GetComponent<RectTransform>();
-        rowRt.sizeDelta = new Vector2(0f, RowHeight);
-
-        var hlg = rowGo.AddComponent<HorizontalLayoutGroup>();
-        hlg.childAlignment        = TextAnchor.MiddleLeft;
-        hlg.spacing                = 16f;
-        hlg.childControlWidth      = false;
-        hlg.childControlHeight     = false;
-        hlg.childForceExpandWidth  = false;
-        hlg.childForceExpandHeight = false;
-
-        var labelGo = new GameObject("Label", typeof(RectTransform));
-        labelGo.transform.SetParent(rowGo.transform, false);
-        labelGo.GetComponent<RectTransform>().sizeDelta = new Vector2(LabelWidth, RowHeight);
-        var labelTmp = labelGo.AddComponent<TextMeshProUGUI>();
-        labelTmp.font      = font;
-        labelTmp.fontSize  = 18;
-        labelTmp.color     = new Color(0.88f, 0.92f, 0.97f);
-        labelTmp.alignment = TextAlignmentOptions.MidlineLeft;
-        labelTmp.text      = label;
+        Transform row = MakeRow(parent, label);
+        float initialValue = get();
 
         var sliderGo = new GameObject("Slider", typeof(RectTransform));
-        sliderGo.transform.SetParent(rowGo.transform, false);
+        sliderGo.transform.SetParent(row, false);
         sliderGo.GetComponent<RectTransform>().sizeDelta = new Vector2(SliderWidth, RowHeight);
+        FixedRowWidth(sliderGo, SliderMinWidth, SliderWidth);
         var slider = BuildSliderVisuals(sliderGo, initialValue, minValue, maxValue);
 
         var valueGo = new GameObject("Value", typeof(RectTransform));
-        valueGo.transform.SetParent(rowGo.transform, false);
+        valueGo.transform.SetParent(row, false);
         valueGo.GetComponent<RectTransform>().sizeDelta = new Vector2(ValueWidth, RowHeight);
+        FixedRowWidth(valueGo, ValueWidth, ValueWidth);
         var valueTmp = valueGo.AddComponent<TextMeshProUGUI>();
         valueTmp.font      = font;
         valueTmp.fontSize  = 18;
@@ -468,7 +637,117 @@ public class SettingsPanelManager : MonoBehaviour
         entry.callback.AddListener(_ => SaveManager.Save());
         trigger.triggers.Add(entry);
 
-        return slider;
+        // The plain .value setter, not SetValueWithoutNotify — the percentage text
+        // only updates from onValueChanged, so SetValueWithoutNotify left it stale
+        // (caught via screenshot: the UI Scale slider sat at 150% while its label
+        // read "100%"). Re-running onChanged is harmless: Slider no-ops on an
+        // unchanged value, and every onChanged here is idempotent.
+        controlRefreshers.Add(() => slider.value = get());
+    }
+
+    /// <summary>Builds one "Label  [ Enabled ][ Disabled ]" row for an on/off
+    /// setting: two buttons, the current choice lit. Clicking one calls set
+    /// (which saves it); get reads the saved value, now and on every
+    /// RefreshControls.</summary>
+    void MakeToggleRow(Transform parent, string label, System.Func<bool> get, System.Action<bool> set)
+    {
+        Transform row = MakeRow(parent, label);
+        Button on  = MakeChoiceButton(row, "Enabled");
+        Button off = MakeChoiceButton(row, "Disabled");
+
+        void Refresh()
+        {
+            bool value = get();
+            on.image.color  = value ? GameTheme.ElectricBlue : ChoiceIdle;
+            off.image.color = value ? ChoiceIdle : GameTheme.ElectricBlue;
+        }
+
+        on.onClick.AddListener(() => { set(true); Refresh(); });
+        off.onClick.AddListener(() => { set(false); Refresh(); });
+        Refresh();
+        controlRefreshers.Add(Refresh);
+    }
+
+    Button MakeChoiceButton(Transform row, string text)
+    {
+        var go = new GameObject($"Choice_{text}", typeof(RectTransform));
+        go.transform.SetParent(row, false);
+        go.GetComponent<RectTransform>().sizeDelta = new Vector2(ChoiceWidth, ChoiceHeight);
+        FixedRowWidth(go, ChoiceMinWidth, ChoiceWidth);
+        var img = go.AddComponent<Image>();
+
+        var labelGo = new GameObject("Label", typeof(RectTransform));
+        labelGo.transform.SetParent(go.transform, false);
+        var labelRt = labelGo.GetComponent<RectTransform>();
+        labelRt.anchorMin = Vector2.zero;
+        labelRt.anchorMax = Vector2.one;
+        labelRt.offsetMin = labelRt.offsetMax = Vector2.zero;
+        var tmp = labelGo.AddComponent<TextMeshProUGUI>();
+        tmp.font      = font;
+        tmp.fontSize  = 16;
+        tmp.fontStyle = FontStyles.Bold;
+        tmp.color     = Color.white;
+        tmp.alignment = TextAlignmentOptions.Center;
+        tmp.text      = text;
+
+        var btn = go.AddComponent<Button>();
+        btn.targetGraphic = img;
+        return btn;
+    }
+
+    /// <summary>An empty settings row with its label in place — controls are
+    /// appended after it. The row's HorizontalLayoutGroup controls child widths
+    /// (via each child's LayoutElement, see FixedRowWidth) so a row can never be
+    /// wider than the content column: label + slider + value + spacing is 552
+    /// at full size, wider than the dialog's 520 column — with fixed widths a
+    /// row overflowed 16 units past both edges, which the scroll viewport's
+    /// RectMask2D then clipped (first letter of every label cut off). Now only
+    /// a row's flexible control (a slider bar, a choice button) gives up width,
+    /// so labels stay aligned across rows.</summary>
+    Transform MakeRow(Transform parent, string label)
+    {
+        var rowGo = new GameObject($"Row_{label}", typeof(RectTransform));
+        rowGo.transform.SetParent(parent, false);
+        rowGo.GetComponent<RectTransform>().sizeDelta = new Vector2(0f, RowHeight);
+
+        var hlg = rowGo.AddComponent<HorizontalLayoutGroup>();
+        hlg.childAlignment         = TextAnchor.MiddleLeft;
+        hlg.spacing                = 16f;
+        hlg.childControlWidth      = true;
+        hlg.childControlHeight     = false;
+        hlg.childForceExpandWidth  = false;
+        hlg.childForceExpandHeight = false;
+
+        var labelGo = new GameObject("Label", typeof(RectTransform));
+        labelGo.transform.SetParent(rowGo.transform, false);
+        labelGo.GetComponent<RectTransform>().sizeDelta = new Vector2(LabelWidth, RowHeight);
+        FixedRowWidth(labelGo, LabelWidth, LabelWidth);
+        var labelTmp = labelGo.AddComponent<TextMeshProUGUI>();
+        labelTmp.font      = font;
+        labelTmp.fontSize  = 18;
+        labelTmp.color     = new Color(0.88f, 0.92f, 0.97f);
+        labelTmp.alignment = TextAlignmentOptions.MidlineLeft;
+        labelTmp.text      = label;
+        // One line always — a longer label ("Tutorial Narration") shrinks a
+        // little to fit LabelWidth rather than wrapping into the row below.
+        labelTmp.textWrappingMode = TextWrappingModes.NoWrap;
+        labelTmp.enableAutoSizing = true;
+        labelTmp.fontSizeMin      = 13f;
+        labelTmp.fontSizeMax      = 18f;
+
+        return rowGo.transform;
+    }
+
+    /// <summary>Width the row's HorizontalLayoutGroup gives this child: preferred
+    /// when the row has room, squeezed toward min when it doesn't. Explicit, so
+    /// a TextMeshProUGUI's own ILayoutElement (preferred = its text's width)
+    /// can't make labels size to their text and misalign the slider column.</summary>
+    static void FixedRowWidth(GameObject go, float minWidth, float preferredWidth)
+    {
+        var le = go.AddComponent<LayoutElement>();
+        le.minWidth       = minWidth;
+        le.preferredWidth = preferredWidth;
+        le.flexibleWidth  = 0f;
     }
 
     /// <summary>Standard Unity UI Slider hierarchy (Background / Fill Area / Fill /
@@ -541,56 +820,71 @@ public class SettingsPanelManager : MonoBehaviour
     }
 
     // ── Subnet Colors section ────────────────────────────────────────────────
-    // A global, order-based palette (not tied to any one level's actual
-    // subnets, per request) — GameTheme.SubnetTint hashes every subnet's
-    // network address into one of these slots. Starts at 5 customizable
-    // slots; '+' adds more rather than resizing the panel to fit — a
-    // ScrollRect handles however many slots exist instead.
+    // A global, order-based palette shared by every level — the first subnet
+    // configured in any level uses slot 0, the second slot 1, and so on (see
+    // SubnetColorRegistry). Starts at 5 customizable slots; '+' / '−' add or
+    // remove slots rather than resizing the panel to fit — a ScrollRect
+    // handles however many slots exist instead. Recoloring a slot mid-level
+    // repaints the scene immediately (SaveManager.SubnetColorsChanged).
 
     const float SwatchSize    = 32f;
     const float SubnetRowH    = 40f;
     const float AddButtonSize = 32f;
 
-    /// <summary>Builds the header, scrollable slot list, and '+' button; returns
-    /// the scroll content Transform (see RebuildSubnetRows) that this surface's
-    /// rows live under.</summary>
+    /// <summary>Builds the header, scrollable slot list, and '−' / '+' buttons;
+    /// returns the scroll content Transform (see RebuildSubnetRows) that this
+    /// surface's rows live under.</summary>
     Transform BuildSubnetSection(Transform content, float viewportHeight)
     {
         MakeSectionHeader(content, "SUBNET COLORS");
 
         var listContent = MakeScrollList(content, viewportHeight);
 
-        var addRowGo = new GameObject("AddSlotRow", typeof(RectTransform));
-        addRowGo.transform.SetParent(content, false);
-        addRowGo.GetComponent<RectTransform>().sizeDelta = new Vector2(0f, AddButtonSize + 6f);
+        var slotCountRowGo = new GameObject("SlotCountRow", typeof(RectTransform));
+        slotCountRowGo.transform.SetParent(content, false);
+        slotCountRowGo.GetComponent<RectTransform>().sizeDelta = new Vector2(0f, AddButtonSize + 6f);
 
-        var addBtnGo = new GameObject("AddSlotButton", typeof(RectTransform));
-        addBtnGo.transform.SetParent(addRowGo.transform, false);
-        var addBtnRt = addBtnGo.GetComponent<RectTransform>();
-        // Centered anchor, not left-edge — AddSlotRow now spans the content's full
-        // width (see MakeContentContainer's childForceExpandWidth), so a left-edge
-        // anchor would pin this to the far-left of that width instead of the
-        // visual center of the panel.
-        addBtnRt.anchorMin = new Vector2(0.5f, 0.5f);
-        addBtnRt.anchorMax = new Vector2(0.5f, 0.5f);
-        addBtnRt.pivot     = new Vector2(0.5f, 0.5f);
-        addBtnRt.anchoredPosition = Vector2.zero;
-        addBtnRt.sizeDelta = new Vector2(AddButtonSize, AddButtonSize);
-        var addBtnImg = addBtnGo.AddComponent<Image>();
-        addBtnImg.color = new Color(0.20f, 0.45f, 0.85f);
-        var addLabelGo = new GameObject("Label");
-        addLabelGo.transform.SetParent(addBtnGo.transform, false);
-        var addLabel = addLabelGo.AddComponent<TextMeshProUGUI>();
-        addLabel.font = font; addLabel.fontSize = 20; addLabel.fontStyle = FontStyles.Bold;
-        addLabel.alignment = TextAlignmentOptions.Center; addLabel.color = Color.white; addLabel.text = "+";
-        var addLabelRt = addLabelGo.GetComponent<RectTransform>();
-        addLabelRt.anchorMin = Vector2.zero; addLabelRt.anchorMax = Vector2.one;
-        addLabelRt.offsetMin = Vector2.zero; addLabelRt.offsetMax = Vector2.zero;
-        var addBtn = addBtnGo.AddComponent<Button>();
-        addBtn.targetGraphic = addBtnImg;
-        addBtn.onClick.AddListener(() =>
+        const float gap = 12f;
+        MakeSlotCountButton(slotCountRowGo.transform, "RemoveSlotButton", "-", -(AddButtonSize + gap) / 2f,
+            new Color(0.30f, 0.32f, 0.38f), SaveManager.RemoveSubnetColorSlot);
+        MakeSlotCountButton(slotCountRowGo.transform, "AddSlotButton", "+", (AddButtonSize + gap) / 2f,
+            new Color(0.20f, 0.45f, 0.85f), () => SaveManager.AddSubnetColorSlot());
+
+        return listContent;
+    }
+
+    /// <summary>One of the '−' / '+' slot-count buttons, xOffset from the row's center.</summary>
+    void MakeSlotCountButton(Transform row, string name, string text, float xOffset, Color color,
+        System.Action changeSlotCount)
+    {
+        var btnGo = new GameObject(name, typeof(RectTransform));
+        btnGo.transform.SetParent(row, false);
+        var btnRt = btnGo.GetComponent<RectTransform>();
+        // Centered anchor, not left-edge — the row spans the content's full
+        // width (see MakeContentContainer's childForceExpandWidth), so a
+        // left-edge anchor would pin these to the far-left of that width
+        // instead of the visual center of the panel.
+        btnRt.anchorMin = new Vector2(0.5f, 0.5f);
+        btnRt.anchorMax = new Vector2(0.5f, 0.5f);
+        btnRt.pivot     = new Vector2(0.5f, 0.5f);
+        btnRt.anchoredPosition = new Vector2(xOffset, 0f);
+        btnRt.sizeDelta = new Vector2(AddButtonSize, AddButtonSize);
+        var btnImg = btnGo.AddComponent<Image>();
+        btnImg.color = color;
+
+        var labelGo = new GameObject("Label");
+        labelGo.transform.SetParent(btnGo.transform, false);
+        var label = labelGo.AddComponent<TextMeshProUGUI>();
+        label.font = font; label.fontSize = 20; label.fontStyle = FontStyles.Bold;
+        label.alignment = TextAlignmentOptions.Center; label.color = Color.white; label.text = text;
+        var labelRt = labelGo.GetComponent<RectTransform>();
+        labelRt.anchorMin = Vector2.zero; labelRt.anchorMax = Vector2.one;
+        labelRt.offsetMin = Vector2.zero; labelRt.offsetMax = Vector2.zero;
+
+        var btn = MakeMouseOnlyButton(btnGo, btnImg);
+        btn.onClick.AddListener(() =>
         {
-            SaveManager.AddSubnetColorSlot();
+            changeSlotCount();
             RebuildSubnetRows(dialogSubnetList);
             RebuildSubnetRows(fullScreenSubnetList);
             // Without this, ScrollRect computes its scrollable range from the
@@ -600,8 +894,21 @@ public class SettingsPanelManager : MonoBehaviour
             ForceRelayout(dialogSubnetList);
             ForceRelayout(fullScreenSubnetList);
         });
+    }
 
-        return listContent;
+    /// <summary>A Button that only reacts to actual clicks. With the default
+    /// (Automatic) navigation, a clicked Button becomes the EventSystem's selected
+    /// object, so every later Enter press (UI Submit) clicks it again, and
+    /// WASD/arrow keys (UI Navigate — also the camera pan keys) can walk the
+    /// selection onto a neighbouring button — for '+' that silently added a slot
+    /// per Enter press. Navigation.Mode.None stops Selectable from selecting on
+    /// click at all, so keyboard input never reaches these buttons.</summary>
+    static Button MakeMouseOnlyButton(GameObject go, Graphic target)
+    {
+        var btn = go.AddComponent<Button>();
+        btn.targetGraphic = target;
+        btn.navigation = new Navigation { mode = Navigation.Mode.None };
+        return btn;
     }
 
     /// <summary>Standard Unity UI ScrollRect hierarchy (Viewport+Mask / Content with
@@ -612,7 +919,9 @@ public class SettingsPanelManager : MonoBehaviour
         var scrollGo = new GameObject("SubnetScroll", typeof(RectTransform));
         scrollGo.transform.SetParent(parent, false);
         scrollGo.GetComponent<RectTransform>().sizeDelta = new Vector2(0f, viewportHeight);
-        var scrollRect = scrollGo.AddComponent<ScrollRect>();
+        // Nested — passes the wheel on to the settings body's own scroll view
+        // (MakeContentContainer) once this list is at its top/bottom.
+        var scrollRect = scrollGo.AddComponent<NestedScrollRect>();
         scrollRect.horizontal = false;
         scrollRect.vertical   = true;
         scrollRect.movementType = ScrollRect.MovementType.Clamped;
@@ -700,19 +1009,31 @@ public class SettingsPanelManager : MonoBehaviour
         swatchGo.GetComponent<RectTransform>().sizeDelta = new Vector2(SwatchSize, SwatchSize);
         var swatchImg = swatchGo.AddComponent<Image>();
         swatchImg.color = GameTheme.SlotColor(slotIndex);
-        var swatchBtn = swatchGo.AddComponent<Button>();
-        swatchBtn.targetGraphic = swatchImg;
+        var swatchBtn = MakeMouseOnlyButton(swatchGo, swatchImg);
         swatchBtn.onClick.AddListener(() => OpenColorPicker(slotIndex));
 
-        var labelGo = new GameObject("Label", typeof(RectTransform));
-        labelGo.transform.SetParent(rowGo.transform, false);
-        labelGo.GetComponent<RectTransform>().sizeDelta = new Vector2(LabelWidth, SubnetRowH);
-        var labelTmp = labelGo.AddComponent<TextMeshProUGUI>();
-        labelTmp.font      = font;
-        labelTmp.fontSize  = 18;
-        labelTmp.color     = new Color(0.88f, 0.92f, 0.97f);
-        labelTmp.alignment = TextAlignmentOptions.MidlineLeft;
-        labelTmp.text      = $"Subnet {slotIndex + 1}";
+        MakeSubnetRowText(rowGo.transform, "Label", $"Subnet {slotIndex + 1}", new Color(0.88f, 0.92f, 0.97f));
+
+        // In a level, name the subnet this slot is coloring right now so the
+        // player can tell which row to recolor. Empty on the main menu (no
+        // level loaded — GameBootstrap resets the registry on the way out).
+        // Shown with its prefix ("192.168.1.0/24") — two subnets can share a
+        // network address and differ only by mask, each with its own slot.
+        if (SubnetColorRegistry.TryGetSubnet(slotIndex, out Subnet subnet))
+            MakeSubnetRowText(rowGo.transform, "InUse", subnet.ToString(), new Color(0.55f, 0.62f, 0.72f));
+    }
+
+    void MakeSubnetRowText(Transform row, string name, string text, Color color)
+    {
+        var go = new GameObject(name, typeof(RectTransform));
+        go.transform.SetParent(row, false);
+        go.GetComponent<RectTransform>().sizeDelta = new Vector2(LabelWidth, SubnetRowH);
+        var tmp = go.AddComponent<TextMeshProUGUI>();
+        tmp.font      = font;
+        tmp.fontSize  = 18;
+        tmp.color     = color;
+        tmp.alignment = TextAlignmentOptions.MidlineLeft;
+        tmp.text      = text;
     }
 
     // ── Color picker popup (shared by both surfaces) ────────────────────────
@@ -747,6 +1068,7 @@ public class SettingsPanelManager : MonoBehaviour
         var catcherBtn = catcherGo.AddComponent<Button>();
         catcherBtn.targetGraphic = catcherImg;
         catcherBtn.onClick.AddListener(ClosePickerPopup);
+        catcherGo.AddComponent<SilentUIButton>(); // not a button to the player — no hover/click sound
 
         const int columns = 4;
         const float cell = 56f;

@@ -48,14 +48,35 @@ public class SlidePanel : MonoBehaviour
     public void SlideIn(Action onComplete = null)
     {
         Vector2 from = restPosition + EdgeOffset();
-        Restart(from, restPosition, EaseOutCubic, onComplete);
+        Restart(from, restPosition, EaseOutCubic, onComplete, duration);
     }
 
-    public void SlideOut(Action onComplete = null)
+    /// <summary>
+    /// Snaps straight to the off-screen "about to slide in" position with no
+    /// animation — call on every element in a staggered SlideIn group up
+    /// front, before any of them actually starts sliding. Without this, an
+    /// element whose position was never previously displaced (e.g. this
+    /// panel's first-ever SlideIn this session, skipping a prior SlideOut)
+    /// sits fully visible at rest until its own staggered turn arrives, then
+    /// visibly snaps off-screen and slides back — reading as "nothing
+    /// animates, then a delayed pop-and-slide" instead of every element
+    /// starting off-screen together the instant the group's entrance begins.
+    /// </summary>
+    public void SnapForSlideIn()
+    {
+        if (rt == null) rt = GetComponent<RectTransform>();
+        if (routine != null) { StopCoroutine(routine); routine = null; }
+        rt.anchoredPosition = restPosition + EdgeOffset();
+    }
+
+    /// <param name="durationOverride">Plays this one exit at a different speed than the
+    /// panel's configured duration — e.g. leaving a level (see NetworkUIManager.SlideOutHud),
+    /// where the exit should be quicker than the entrance.</param>
+    public void SlideOut(Action onComplete = null, float? durationOverride = null)
     {
         Vector2 from = rt != null ? rt.anchoredPosition : restPosition;
         Vector2 to   = restPosition + EdgeOffset();
-        Restart(from, to, EaseInCubic, onComplete);
+        Restart(from, to, EaseInCubic, onComplete, durationOverride ?? duration);
     }
 
     Vector2 EdgeOffset()
@@ -69,21 +90,21 @@ public class SlidePanel : MonoBehaviour
         }
     }
 
-    void Restart(Vector2 from, Vector2 to, Func<float, float> ease, Action onComplete)
+    void Restart(Vector2 from, Vector2 to, Func<float, float> ease, Action onComplete, float playDuration)
     {
         if (rt == null) rt = GetComponent<RectTransform>();
         if (routine != null) StopCoroutine(routine);
-        routine = StartCoroutine(Animate(from, to, ease, onComplete));
+        routine = StartCoroutine(Animate(from, to, ease, onComplete, playDuration));
     }
 
-    IEnumerator Animate(Vector2 from, Vector2 to, Func<float, float> ease, Action onComplete)
+    IEnumerator Animate(Vector2 from, Vector2 to, Func<float, float> ease, Action onComplete, float playDuration)
     {
         rt.anchoredPosition = from;
         float t = 0f;
-        while (t < duration)
+        while (t < playDuration)
         {
             t += Time.unscaledDeltaTime;
-            float p = ease(Mathf.Clamp01(t / duration));
+            float p = ease(Mathf.Clamp01(t / playDuration));
             rt.anchoredPosition = Vector2.LerpUnclamped(from, to, p);
             yield return null;
         }

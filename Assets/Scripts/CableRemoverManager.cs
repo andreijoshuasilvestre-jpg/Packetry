@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.InputSystem;
 
 /// <summary>
@@ -48,7 +49,7 @@ public class CableRemoverManager : MonoBehaviour
     {
         if (!isRemoving) return;
         if (CLIPanelManager.Instance != null && CLIPanelManager.Instance.IsOpen) return;
-        if (SettingsPanelManager.Instance != null && SettingsPanelManager.Instance.IsOpen) return;
+        if (InteractionMode.IsSuspended) return;
 
         UpdateHover();
 
@@ -61,8 +62,21 @@ public class CableRemoverManager : MonoBehaviour
 
     void UpdateHover()
     {
-        Cable closest = FindClosestCable(out float dist);
-        Cable next = (dist <= pickPixelDistance) ? closest : null;
+        // Destroyed-but-still-referenced hover — see DeviceRemoverManager.UpdateHover.
+        if (!ReferenceEquals(hoveredCable, null) && hoveredCable == null)
+        {
+            selectionIndicator?.Hide();
+            hoveredCable = null;
+        }
+
+        // Over the HUD the click belongs to that UI, not to a cable that
+        // happens to run behind it on screen — see DeviceRemoverManager.UpdateHover.
+        Cable next = null;
+        if (!IsPointerOverUI())
+        {
+            Cable closest = FindClosestCable(out float dist);
+            next = (dist <= pickPixelDistance) ? closest : null;
+        }
 
         if (next == hoveredCable) return;
 
@@ -70,6 +84,9 @@ public class CableRemoverManager : MonoBehaviour
         hoveredCable = next;
         SetHighlight(hoveredCable, true);
     }
+
+    static bool IsPointerOverUI() =>
+        EventSystem.current != null && EventSystem.current.IsPointerOverGameObject();
 
     Cable FindClosestCable(out float bestDist)
     {
@@ -132,6 +149,7 @@ public class CableRemoverManager : MonoBehaviour
         var cable = hoveredCable;
         hoveredCable = null;
         selectionIndicator?.Hide(); // about to be destroyed — don't leave the outline tracking it
+        if (cable != null) AudioManager.Instance?.PlaySfx(SfxId.Remove);
         CableManager.Instance?.RemoveCable(cable);
     }
 

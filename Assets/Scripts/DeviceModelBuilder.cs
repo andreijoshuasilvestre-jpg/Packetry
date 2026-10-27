@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
@@ -62,15 +63,15 @@ public static class DeviceModelBuilder
         s_switchLedMat  = MakeLitMaterial(new Color(0.10f, 0.85f, 0.15f));
         s_routerBodyMat = MakeTexturedLitMaterial(new Color(0.92f, 0.92f, 0.94f), 301);
         s_routerChassisMat = MakeTexturedLitMaterial(new Color(0.10f, 0.10f, 0.10f), 302);
-        s_tableTopMat   = MakeLitMaterial(new Color(0.04f, 0.04f, 0.05f));
-        s_tableLegMat   = MakeLitMaterial(new Color(0.02f, 0.02f, 0.03f));
+        s_tableTopMat   = MakeTexturedLitMaterial(new Color(0.04f, 0.04f, 0.05f), 401);
+        s_tableLegMat   = MakeTexturedLitMaterial(new Color(0.02f, 0.02f, 0.03f), 402);
         // A distinct cyan/teal instead of blending into the same s_darkMat as
         // the rest of the chassis trim — ports are the one part of a device a
         // player actually needs to pick out visually (see NetworkDevice.
         // HighlightFreePorts, driven by CableManager while the interface
         // picker is open), so they read as their own "thing" at a glance even
         // before any highlight kicks in.
-        s_portMat       = MakeLitMaterial(new Color(0.25f, 0.78f, 0.9f));
+        s_portMat       = MakeTexturedLitMaterial(new Color(0.25f, 0.78f, 0.9f), 403);
         s_portArrowMat  = MakeUnlitDoubleSidedMaterial(new Color(0.15f, 0.95f, 0.25f));
     }
 
@@ -98,11 +99,19 @@ public static class DeviceModelBuilder
         return mat;
     }
 
-    // Deterministic (seeded, System.Random — doesn't touch UnityEngine.Random's
-    // global state, which other systems rely on) per-pixel lightness noise
-    // around a base color. Point-filtered + no mip chain so it stays crisp,
-    // blocky pixels at any distance instead of blurring into smooth grain —
-    // that crunchy, low-res look is the whole point (PS1-style texturing).
+    // Same fake-shading trick Cable.GetCableTexture bakes across a cable's
+    // width (brighter middle, darker edges, reading as a lit cylinder out of
+    // a flat ribbon) — applied here as a top-to-bottom gradient across each
+    // face instead, so a flat primitive cuboid reads as gently lit from above
+    // rather than uniformly flat. Combined with the existing deterministic
+    // (seeded, System.Random — doesn't touch UnityEngine.Random's global
+    // state, which other systems rely on) per-pixel lightness noise. Point-
+    // filtered + no mip chain so it stays crisp, blocky pixels at any
+    // distance instead of blurring into smooth grain — that crunchy, low-res
+    // look is the whole point (PS1-style texturing).
+    const float ShadeBottom = 0.82f;
+    const float ShadeTop    = 1.15f;
+
     public static Texture2D CreatePixelNoiseTexture(int size, Color baseColor, float variation, int seed)
     {
         var tex = new Texture2D(size, size, TextureFormat.RGBA32, false)
@@ -114,14 +123,19 @@ public static class DeviceModelBuilder
 
         var rng = new System.Random(seed);
         var pixels = new Color32[size * size];
-        for (int i = 0; i < pixels.Length; i++)
+        for (int y = 0; y < size; y++)
         {
-            float n = (float)(rng.NextDouble() * 2.0 - 1.0) * variation;
-            pixels[i] = new Color(
-                Mathf.Clamp01(baseColor.r + n),
-                Mathf.Clamp01(baseColor.g + n),
-                Mathf.Clamp01(baseColor.b + n),
-                1f);
+            float v     = (y + 0.5f) / size; // 0 at the bottom of the face, 1 at the top
+            float shade = Mathf.Lerp(ShadeBottom, ShadeTop, v);
+            for (int x = 0; x < size; x++)
+            {
+                float n = (float)(rng.NextDouble() * 2.0 - 1.0) * variation;
+                pixels[y * size + x] = new Color(
+                    Mathf.Clamp01(baseColor.r * shade + n),
+                    Mathf.Clamp01(baseColor.g * shade + n),
+                    Mathf.Clamp01(baseColor.b * shade + n),
+                    1f);
+            }
         }
         tex.SetPixels32(pixels);
         tex.Apply(false, false);
@@ -270,7 +284,16 @@ public static class DeviceModelBuilder
     }
 
     // ── PC ──────────────────────────────────────────────────────────────────
-    public static GameObject BuildPC() => LoadDevicePrefab("PC") ?? BuildPCProcedural();
+    // PCMonitor is added here rather than baked into the prefab so both build
+    // paths get it, and so it lands before BuildTemplate deactivates the PC —
+    // a DragDropManager clone then already carries the screen quad when its
+    // hologram material swap runs.
+    public static GameObject BuildPC()
+    {
+        GameObject pc = LoadDevicePrefab("PC") ?? BuildPCProcedural();
+        PCMonitor.Attach(pc);
+        return pc;
+    }
 
     static GameObject BuildPCProcedural()
     {
@@ -338,9 +361,10 @@ public static class DeviceModelBuilder
 
         Transform visual = AddVisualRoot(root, nd);
 
-        // Body
+        // Body — named to match PBCube("Switch_Body", ...) on the prefab-baked
+        // build path (see SubnetVisualizer's switch-tint scoping).
         Part(PrimitiveType.Cube, new Vector3(0f, 0.09f, 0f),
-             new Vector3(1.35f, 0.18f, 0.63f), s_switchBodyMat, visual);
+             new Vector3(1.35f, 0.18f, 0.63f), s_switchBodyMat, visual, "Switch_Body");
 
         // LED strip
         Part(PrimitiveType.Cube, new Vector3(0f, 0.20f, 0f),
@@ -437,23 +461,66 @@ public static class DeviceModelBuilder
     // ── Table ────────────────────────────────────────────────────────────────
     // Built directly at its final world position by TableManager — no drag/physics
     // step, since the two placement clicks already fix both position and footprint.
+    // The footprint can still change afterward (TableManager's resize handles) —
+    // LayoutTable is the one place it's applied, at build time and on resize.
     public static GameObject BuildTable(float width, float length)
     {
         EnsureMaterials();
         var root = new GameObject("Table");
         var table = root.AddComponent<Table>();
+        table.topSurfaceY = TableHeight + TableTopThickness * 0.5f; // exposed so Cable can route above it
+
+        // Placed and sized by LayoutTable below. Top first, then the legs —
+        // LayoutTable finds them in that order.
+        Part(PrimitiveType.Cube, Vector3.zero, Vector3.one, s_tableTopMat, root.transform, "TableTop");
+        for (int i = 0; i < 4; i++)
+            Part(PrimitiveType.Cube, Vector3.zero, Vector3.one, s_tableLegMat, root.transform, "TableLeg");
+
+        // Solid from the ground up to the tabletop surface, not just the thin
+        // top slab — legs are visual-only (their per-part colliders are
+        // destroyed in Part()), so a slab-only collider would let anything
+        // pass through the open space between them.
+        root.AddComponent<BoxCollider>();
+
+        LayoutTable(table, width, length);
+        return root;
+    }
+
+    /// <summary>Re-fits a placed table's top, legs and collider to a new
+    /// footprint around its own pivot (TableManager's resize handles, and
+    /// undoing a resize). The caller moves the table to the new center.</summary>
+    public static void ResizeTable(Table table, float width, float length)
+    {
+        if (table != null) LayoutTable(table, width, length);
+    }
+
+    static void LayoutTable(Table table, float width, float length)
+    {
         table.width  = width;
         table.length = length;
+
+        // The top is the first mesh child and the legs the next four — the
+        // order BuildTable adds them in. Found by order, not name: a table
+        // baked into a level template before the parts were named has them
+        // all as plain "Cube"s.
+        Transform top = null;
+        var legs = new List<Transform>(4);
+        foreach (Transform child in table.transform)
+        {
+            if (child.GetComponent<MeshRenderer>() == null) continue;
+            if (top == null) top = child;
+            else if (legs.Count < 4) legs.Add(child);
+        }
 
         const float topThickness = TableTopThickness;
         const float legThickness = TableLegThickness;
         const float legInset     = TableLegInset;
 
-        float topSurfaceY = TableHeight + topThickness * 0.5f;
-        table.topSurfaceY = topSurfaceY; // exposed so Cable can route above it
-
-        Part(PrimitiveType.Cube, new Vector3(0f, TableHeight, 0f),
-             new Vector3(width, topThickness, length), s_tableTopMat, root.transform);
+        if (top != null)
+        {
+            top.localPosition = new Vector3(0f, TableHeight, 0f);
+            top.localScale    = new Vector3(width, topThickness, length);
+        }
 
         float legHeight = TableHeight - topThickness * 0.5f;
         float hx = Mathf.Max(width * 0.5f - legInset, legThickness);
@@ -463,19 +530,18 @@ public static class DeviceModelBuilder
             new Vector3(-hx, 0f, -hz), new Vector3(hx, 0f, -hz),
             new Vector3(-hx, 0f,  hz), new Vector3(hx, 0f,  hz),
         };
-        foreach (var off in legOffsets)
-            Part(PrimitiveType.Cube, new Vector3(off.x, legHeight * 0.5f, off.z),
-                 new Vector3(legThickness, legHeight, legThickness), s_tableLegMat, root.transform);
+        for (int i = 0; i < legs.Count; i++)
+        {
+            legs[i].localPosition = new Vector3(legOffsets[i].x, legHeight * 0.5f, legOffsets[i].z);
+            legs[i].localScale    = new Vector3(legThickness, legHeight, legThickness);
+        }
 
-        // Solid from the ground up to the tabletop surface, not just the thin
-        // top slab — legs are visual-only (their per-part colliders are
-        // destroyed in Part()), so a slab-only collider would let anything
-        // pass through the open space between them.
-        var col = root.AddComponent<BoxCollider>();
-        col.center = new Vector3(0f, topSurfaceY * 0.5f, 0f);
-        col.size   = new Vector3(width, topSurfaceY, length);
-
-        return root;
+        var col = table.GetComponent<BoxCollider>();
+        if (col != null)
+        {
+            col.center = new Vector3(0f, table.topSurfaceY * 0.5f, 0f);
+            col.size   = new Vector3(width, table.topSurfaceY, length);
+        }
     }
 
     // Returns an inactive template (palette uses copies of these)

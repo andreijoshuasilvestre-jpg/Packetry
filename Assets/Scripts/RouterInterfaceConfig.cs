@@ -20,6 +20,7 @@ public class RouterInterfaceConfig : MonoBehaviour
         public string ip = "";       // "" = unassigned
         public string mask = "";     // "" = unassigned
         public bool shutdown = true; // real IOS default: interfaces start administratively down
+        public long addressedAtTicks; // when this interface joined its subnet — see DeviceAddress.AddressedAtTicks
     }
 
     [SerializeField] private PortConfig[] ports = new PortConfig[0];

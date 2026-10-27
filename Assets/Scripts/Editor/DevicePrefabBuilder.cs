@@ -100,11 +100,11 @@ public static class DevicePrefabBuilder
         switchLed     = MakeMat("SwitchLed",  new Color(0.10f, 0.85f, 0.15f)),
         routerBody    = MakeTexturedMat("RouterBody",    new Color(0.92f, 0.92f, 0.94f), 301),
         routerChassis = MakeTexturedMat("RouterChassis", new Color(0.10f, 0.10f, 0.10f), 302),
-        port       = MakeMat("Port",       new Color(0.25f, 0.78f, 0.90f)),
+        port       = MakeTexturedMat("Port",       new Color(0.25f, 0.78f, 0.90f), 403),
         // Matches DeviceModelBuilder's s_tableTopMat/s_tableLegMat colors exactly
         // so TableProp reads as "the same table" as the in-game gameplay one.
-        tableTop   = MakeMat("TableTop",   new Color(0.04f, 0.04f, 0.05f)),
-        tableLeg   = MakeMat("TableLeg",   new Color(0.02f, 0.02f, 0.03f)),
+        tableTop   = MakeTexturedMat("TableTop", new Color(0.04f, 0.04f, 0.05f), 401),
+        tableLeg   = MakeTexturedMat("TableLeg", new Color(0.02f, 0.02f, 0.03f), 402),
     };
 
     static Material MakeMat(string name, Color color)

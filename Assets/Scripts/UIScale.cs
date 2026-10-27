@@ -19,6 +19,10 @@ public static class UIScale
     public static Vector2 ReferenceResolution =>
         BaseReferenceResolution / Mathf.Clamp(SaveManager.Settings.uiScale, 0.5f, 2f);
 
+    /// <summary>Minimum gap (canvas units) FitToScreen keeps between a panel
+    /// and the screen edge when it has to shrink that panel to fit.</summary>
+    public const float ScreenMargin = 24f;
+
     // Every canvas built while the game is running registers its scaler here so
     // dragging SettingsPanelManager's slider restyles already-built canvases
     // immediately, not just ones built after the change (managers rebuild fresh
@@ -33,6 +37,11 @@ public static class UIScale
     {
         registered.RemoveAll(s => s == null);
         registered.Add(scaler);
+        // Expand rather than the default width-only match: the canvas is then
+        // guaranteed to be at least ReferenceResolution in BOTH dimensions, so
+        // a window wider than 16:9 can't silently lose canvas height and clip
+        // top/bottom-anchored UI. Identical to width-match at exactly 16:9.
+        scaler.screenMatchMode     = CanvasScaler.ScreenMatchMode.Expand;
         scaler.referenceResolution = ReferenceResolution;
     }
 

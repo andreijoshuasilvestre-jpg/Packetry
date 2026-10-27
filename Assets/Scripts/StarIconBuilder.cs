@@ -13,99 +13,120 @@ using UnityEngine;
 /// this no matter which font is picked. A dedicated Image + baked sprite
 /// sidesteps the whole font-coverage question.
 ///
+/// The star is a hand-placed pixel mask (see Pattern) on a coarse GridSize x
+/// GridSize grid, and each cell is then blown up into a solid pixelScale
+/// block, so it reads as genuine pixel art — a 1px dark outline plus
+/// top-left highlight / bottom-right shadow cells, like the PixeloidMono font
+/// it sits next to. Draw it at a whole multiple of GridSize on screen (see
+/// DisplaySize) so every cell stays the same width.
+///
 /// Fill color is baked into the sprite (not tinted via Image.color) so a
 /// filled and an empty star are two distinct cached sprites, same convention
-/// CheckmarkIconBuilder uses for its stroke color.
+/// CheckmarkIconBuilder uses for its stroke color; the outline/highlight/
+/// shadow shades are all derived from that one fill.
 /// </summary>
 public static class StarIconBuilder
 {
+    // Shared by every star rating display (LevelCompletePanel's reveal row,
+    // LevelSelectManager's per-card rows and total) so earned/unearned read
+    // the same everywhere.
+    public static readonly Color EarnedColor   = GameTheme.Warning;
+    public static readonly Color UnearnedColor = new Color(0.35f, 0.36f, 0.40f, 1f);
+
+    // Near-black cavity of GetEngravedSprite's empty slot.
+    static readonly Color32 HoleColor = new Color32(14, 15, 19, 255);
+
+    // Star silhouette, top row first. Hand-placed rather than sampled from a
+    // star polygon: at 11 cells a sampled regular star drops the two
+    // diagonal leg tips (they fall between cell centers), leaving stubby
+    // legs under a full-length top point. Here every point tapers the same
+    // 1 -> 2 -> 3 cells from its tip (the top point runs straight up, so
+    // its 1-cell sliver is one row longer to read as long as a diagonal),
+    // and the tips sit where a regular star's would on this grid.
+    static readonly string[] Pattern =
+    {
+        ".....#.....",
+        ".....#.....",
+        "....###....",
+        "....###....",
+        "###########",
+        ".#########.",
+        "..#######..",
+        "...#####...",
+        "..###.###..",
+        "..##...##..",
+        "..#.....#..",
+    };
+
+    const int PatternSize = 11;
+
+    /// <summary>Star pixels per side: the pattern plus a 1-cell margin on
+    /// every side for the outline ring (see PixelGlyph.Pad). Odd, so the
+    /// upright star has a single center column.</summary>
+    public const int GridSize = PatternSize + 2;
+
+    /// <summary>On-screen size (UI units) that gives every star pixel an even
+    /// 3x3 block — about the block size of the PixeloidMono labels beside it.</summary>
+    public const float DisplaySize = GridSize * 3;
+
     static readonly Dictionary<Params, Sprite> s_cache = new();
 
     readonly struct Params : IEquatable<Params>
     {
         public readonly Color32 fill;
-        public readonly int logicalSize, pixelScale;
+        public readonly int pixelScale;
+        public readonly bool engraved;
 
-        public Params(Color32 fill, int logicalSize, int pixelScale)
+        public Params(Color32 fill, int pixelScale, bool engraved)
         {
             this.fill = fill;
-            this.logicalSize = logicalSize;
             this.pixelScale = pixelScale;
+            this.engraved = engraved;
         }
 
-        public bool Equals(Params o) =>
-            fill.Equals(o.fill) && logicalSize == o.logicalSize && pixelScale == o.pixelScale;
+        public bool Equals(Params o) => fill.Equals(o.fill) && pixelScale == o.pixelScale && engraved == o.engraved;
         public override bool Equals(object obj) => obj is Params p && Equals(p);
-        public override int GetHashCode() => HashCode.Combine(fill, logicalSize, pixelScale);
+        public override int GetHashCode() => HashCode.Combine(fill, pixelScale, engraved);
     }
 
     /// <summary>
-    /// Builds (or reuses a cached) upright 5-point star Sprite, point-filtered
-    /// and upscaled by <paramref name="pixelScale"/> so it stays crisp/blocky
-    /// at large on-screen sizes instead of blurring like a smooth vector star.
+    /// Builds (or reuses a cached) upright 5-point pixel-art star Sprite,
+    /// point-filtered, with each grid cell upscaled to a
+    /// <paramref name="pixelScale"/>-texel block.
     /// </summary>
-    public static Sprite GetSprite(Color32 fill, int logicalSize = 24, int pixelScale = 6)
+    public static Sprite GetSprite(Color32 fill, int pixelScale = 6) => Get(new Params(fill, pixelScale, engraved: false));
+
+    /// <summary>
+    /// An empty star slot drawn as a star-shaped hole dug into the surface
+    /// under it (see PixelGlyph.Engraved) — same silhouette and grid as
+    /// GetSprite, so an earned star fills its hole exactly.
+    /// </summary>
+    public static Sprite GetEngravedSprite(int pixelScale = 6) => Get(new Params(HoleColor, pixelScale, engraved: true));
+
+    static Sprite Get(Params key)
     {
-        var key = new Params(fill, logicalSize, pixelScale);
         if (s_cache.TryGetValue(key, out Sprite cached) && cached != null) return cached;
 
-        int size = logicalSize * pixelScale;
-        var tex = new Texture2D(size, size, TextureFormat.RGBA32, false)
-        {
-            name = "StarIcon",
-            filterMode = FilterMode.Point,
-            wrapMode = TextureWrapMode.Clamp,
-        };
+        // Outline/highlight/shadow cells — see PixelGlyph.Shaded (this
+        // star's look, since shared with CheckmarkIconBuilder's shaded tick).
+        bool[] mask = RasterizeStar();
+        Color32[] cells = key.engraved
+            ? PixelGlyph.Engraved(mask, GridSize, key.fill)
+            : PixelGlyph.Shaded(mask, GridSize, key.fill);
 
-        // 10 vertices alternating outer/inner radius, starting straight up
-        // (angle -90°) so the star points up — logical space has y=0 at the
-        // bottom (matches CheckmarkIconBuilder's convention), which lines up
-        // directly with the texture row index used below.
-        Vector2 center = new Vector2(logicalSize * 0.5f, logicalSize * 0.5f);
-        float outerR = logicalSize * 0.48f;
-        float innerR = outerR * 0.40f;
-        var verts = new Vector2[10];
-        for (int i = 0; i < 10; i++)
-        {
-            float angle = -Mathf.PI / 2f + i * Mathf.PI / 5f;
-            float r = (i % 2 == 0) ? outerR : innerR;
-            verts[i] = center + new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)) * r;
-        }
-
-        var pixels = new Color32[size * size];
-        var clear = new Color32(0, 0, 0, 0);
-        for (int y = 0; y < size; y++)
-        {
-            float ly = (y + 0.5f) / pixelScale;
-            for (int x = 0; x < size; x++)
-            {
-                float lx = (x + 0.5f) / pixelScale;
-                pixels[y * size + x] = PointInPolygon(new Vector2(lx, ly), verts) ? fill : clear;
-            }
-        }
-
-        tex.SetPixels32(pixels);
-        tex.Apply();
-
-        var sprite = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), 100f * pixelScale);
-        sprite.name = "StarIcon";
-
+        var sprite = PixelGlyph.ToSprite(cells, GridSize, key.pixelScale, key.engraved ? "StarHole" : "StarIcon");
         s_cache[key] = sprite;
         return sprite;
     }
 
-    // Standard even-odd ray-casting point-in-polygon test.
-    static bool PointInPolygon(Vector2 p, Vector2[] poly)
+    // Pattern -> coverage mask (row 0 at the bottom, like Texture2D), padded
+    // out to GridSize so the outline ring has room.
+    static bool[] RasterizeStar()
     {
-        bool inside = false;
-        int j = poly.Length - 1;
-        for (int i = 0; i < poly.Length; i++)
-        {
-            if ((poly[i].y > p.y) != (poly[j].y > p.y) &&
-                p.x < (poly[j].x - poly[i].x) * (p.y - poly[i].y) / (poly[j].y - poly[i].y) + poly[i].x)
-                inside = !inside;
-            j = i;
-        }
-        return inside;
+        var mask = new bool[PatternSize * PatternSize];
+        for (int row = 0; row < PatternSize; row++)
+            for (int x = 0; x < PatternSize; x++)
+                mask[(PatternSize - 1 - row) * PatternSize + x] = Pattern[row][x] == '#';
+        return PixelGlyph.Pad(mask, PatternSize, 1);
     }
 }

@@ -11,6 +11,7 @@ using UnityEngine;
 public static class RadialGlowSprite
 {
     static Sprite shared;
+    static Material additiveMaterial;
 
     public static Sprite Get()
     {
@@ -39,5 +40,20 @@ public static class RadialGlowSprite
 
         shared = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f));
         return shared;
+    }
+
+    /// <summary>
+    /// Shared additive-blend material for this sprite — overlapping glow/spark
+    /// layers add light instead of just alpha-compositing a flat tinted shape,
+    /// which is what makes a click glow read as a real light source rather than
+    /// a pixelated translucent sprite. Falls back to plain alpha blending
+    /// (UI/Default) if the custom shader got stripped from a build.
+    /// </summary>
+    public static Material GetAdditiveMaterial()
+    {
+        if (additiveMaterial != null) return additiveMaterial;
+        Shader shader = Shader.Find("UI/AdditiveGlow") ?? Shader.Find("UI/Default");
+        additiveMaterial = new Material(shader);
+        return additiveMaterial;
     }
 }

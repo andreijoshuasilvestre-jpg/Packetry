@@ -21,6 +21,40 @@ public class DeviceAddress : MonoBehaviour
 
     public bool HasAddress => SubnetMath.IsDottedQuad(Ip) && SubnetMath.IsDottedQuad(Mask);
 
+    // When this device joined its current subnet (DateTime ticks). 0 = unknown
+    // (template-baked, or a save from before this existed). It no longer
+    // decides any color — SubnetVisualizer now votes on what's configured
+    // rather than on the order it was typed — but it's still saved/restored so
+    // saves round-trip unchanged, and Level2Guide reads it to find which PC
+    // was addressed last on resume.
+    [SerializeField] private long addressedAtTicks;
+    public long AddressedAtTicks => addressedAtTicks;
+
+    // Per-PC receive capability, configured in DeviceAddressPopup — default
+    // both on so an un-touched PC behaves exactly like before this field
+    // existed. Independent of each other on purpose (see the packet-send
+    // redesign memory: mutually-exclusive send/receive PC modes were
+    // considered and rejected as unrealistic and confusing).
+    [SerializeField] private bool acceptHttpRequest = true;
+    [SerializeField] private bool acceptFileTransfer = true;
+    public bool AcceptsHttpRequest  => acceptHttpRequest;
+    public bool AcceptsFileTransfer => acceptFileTransfer;
+
+    public bool Accepts(PacketType type) => type switch
+    {
+        PacketType.FileTransfer => acceptFileTransfer,
+        // HttpResponse always accepted — it's the reactive reply to a request
+        // this same device (or its peer) already chose to send, never a
+        // player-initiated send a receive-flag should be able to block.
+        _ => acceptHttpRequest || type == PacketType.HttpResponse,
+    };
+
+    public void SetAccepts(bool http, bool file)
+    {
+        acceptHttpRequest  = http;
+        acceptFileTransfer = file;
+    }
+
     static MaterialPropertyBlock s_tintBlock;
 
     // Only the PC's own case gets recolored by its subnet — the monitor
@@ -31,11 +65,16 @@ public class DeviceAddress : MonoBehaviour
     // part on both the runtime-fallback and prefab-baked build paths.
     const string TintTargetPartName = "PC_Tower";
 
-    // Blend weight for the subnet tint — kept low so it reads as a subtle
-    // accent on the case rather than a loud color swap (was 0.7 back when the
-    // whole model was tinted; scoping down to just the case alone already
-    // reads stronger, so this also came down).
-    const float TintStrength = 0.42f;
+    // Blend weight for the subnet tint. PC_Tower's own base color is very
+    // dark (~0.1) — the original assumption (see old comment below) was that
+    // scoping the tint down to just the case alone would read stronger even
+    // at a low blend weight, but a low lerp from a near-black base just stays
+    // dark (e.g. 0.42 toward red only reaches ~(0.42, 0.14, 0.14), easy to
+    // mistake for "not tinted at all" next to true black) — confirmed live:
+    // Switch_Body's own tint (same 0.42, see SubnetVisualizer) reads clearly
+    // because its base is a mid-grey, not because scoping helped. Bumped up
+    // so a dark base still lands somewhere clearly colored.
+    const float TintStrength = 0.65f;
 
     // Re-applies the tint on load too — SetPropertyBlock is a runtime-only
     // renderer state, not something Unity's scene serializer restores, so a
@@ -43,10 +82,23 @@ public class DeviceAddress : MonoBehaviour
     // color instead of just carrying the (correct, once this fix lands) data.
     void Awake() => ApplyTint();
 
-    public void SetAddress(string newIp, string newMask)
+    /// <param name="addressedAt">Restores a saved AddressedAtTicks (save load,
+    /// undo). Omitted = a player action: stamped now, unless the device stays on
+    /// the same subnet — only moving to a different subnet counts as joining it
+    /// later, so re-confirming or changing just the host part keeps its place.</param>
+    public void SetAddress(string newIp, string newMask, long? addressedAt = null)
     {
+        if (addressedAt.HasValue)
+            addressedAtTicks = addressedAt.Value;
+        else if (!SubnetMath.SameSubnet(ip, mask, newIp, newMask))
+            addressedAtTicks = System.DateTime.UtcNow.Ticks;
+
         ip   = newIp;
         mask = newMask;
+        // RefreshAll first — it frees the old subnet's color slot (if no other
+        // device is still on it) so the new subnet can take that slot back,
+        // rather than moving on to the next color.
+        SubnetVisualizer.RefreshAll();
         ApplyTint();
     }
 
@@ -71,7 +123,7 @@ public class DeviceAddress : MonoBehaviour
             if (r.gameObject.name == TintTargetPartName) { hasNamedTarget = true; break; }
 
         Color tint = HasAddress
-            ? GameTheme.SubnetTint(SubnetMath.NetworkAddress(Ip, Mask))
+            ? GameTheme.SubnetTint(SubnetMath.SubnetOf(Ip, Mask))
             : default;
 
         foreach (var r in all)
@@ -85,7 +137,16 @@ public class DeviceAddress : MonoBehaviour
             // this, deselecting a tinted PC would leave those parts stuck highlighted.
             if (!HasAddress || !isTarget) { r.SetPropertyBlock(null); continue; }
 
-            string prop = r.sharedMaterial.HasProperty("_BaseColor") ? "_BaseColor" : "_Color";
+            // Skip a material with neither property (e.g. DeviceRimLight's
+            // additive Custom/RimGlow shells, which only expose _RimColor)
+            // instead of blindly assuming "_Color" exists — only reachable in
+            // practice on a hasNamedTarget=false device (Switch/Router, if
+            // ever given a DeviceAddress), since a PC's own isTarget check
+            // above already narrows to just its "PC_Tower" part.
+            if (r.sharedMaterial == null) continue; // see PacketSendManager.HighlightDevice
+            bool hasBase = r.sharedMaterial.HasProperty("_BaseColor");
+            if (!hasBase && !r.sharedMaterial.HasProperty("_Color")) continue;
+            string prop = hasBase ? "_BaseColor" : "_Color";
             Color orig = r.sharedMaterial.GetColor(prop);
             s_tintBlock.Clear();
             s_tintBlock.SetColor(prop, Color.Lerp(orig, tint, TintStrength));

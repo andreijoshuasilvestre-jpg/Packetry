@@ -5,10 +5,12 @@ using TMPro;
 
 /// <summary>
 /// Small popup for assigning a PC's IP address — mirrors InterfacePickerPopup's
-/// self-contained screen-space-overlay pattern. Shows the mask in both dotted
-/// and /N (CIDR) form side by side, with a stepper that live-converts between
-/// them and shows the usable-host count, so the player feels /24 vs /28 as a
-/// host-count tradeoff before ever being asked to compute one.
+/// self-contained screen-space-overlay pattern. Shows the dotted subnet mask
+/// with a stepper that live-converts prefix length into it and shows the
+/// usable-host count, so the player feels /24 vs /28 as a host-count tradeoff
+/// before ever being asked to compute one. CIDR (/N) notation itself is taught
+/// on the router CLI (RouterCLI's live mask hint), not duplicated here — a PC
+/// only ever needs to match its subnet's dotted mask.
 ///
 /// Styled to match CLIPanelManager's router terminal look rather than a flat
 /// panel: silver chamfered outer shell (PlateSpriteBuilder), a black terminal
@@ -22,8 +24,12 @@ public class DeviceAddressPopup : MonoBehaviour
 
     public bool IsOpen => _panelRoot != null && _panelRoot.activeSelf;
 
-    const int MinPrefix = 8;
-    const int MaxPrefix = 30;
+    // The full assignable range, 128.0.0.0 (/1) through 255.255.255.252 (/30) — this
+    // used to stop at 255.0.0.0 (/8), the old classful floor, which isn't a real limit
+    // on a subnet mask (see SubnetMath.MinUsablePrefix) and disagreed with the router
+    // CLI, which always accepted shorter masks.
+    const int MinPrefix = SubnetMath.MinUsablePrefix;
+    const int MaxPrefix = SubnetMath.MaxUsablePrefix; // /31, /32 are never assignable — see SubnetMath.MaxUsablePrefix
     const int DefaultPrefix = 24;
 
     const string FontResourcePath = "Fonts/PixeloidMono SDF";
@@ -35,10 +41,17 @@ public class DeviceAddressPopup : MonoBehaviour
 
     GameObject      _panelRoot;
     RectTransform   _panelRt;
+    // Sits between DeviceAddress_Canvas and _panelRoot, carrying a
+    // RectMask2D — Show() animates THIS rect's height open (see
+    // PanelRevealFX), while _panelRoot/_panelRt keep a fixed size/position
+    // inside it, same split CLIPanelManager uses for its own reveal.
+    GameObject      _panelWrapper;
+    Canvas          _canvas;
     TMP_InputField  _ipField;
     TextMeshProUGUI _maskLabel;
-    TextMeshProUGUI _cidrLabel;
     TextMeshProUGUI _hostsLabel;
+    Toggle          _httpToggle;
+    Toggle          _fileToggle;
 
     static readonly Vector2 PanelSize = new Vector2(300, 210);
 
@@ -82,6 +95,7 @@ public class DeviceAddressPopup : MonoBehaviour
     {
         if (!IsOpen || Mouse.current == null) return;
         if (Time.frameCount == _shownFrame) return; // ignore the click that opened us
+        if (InteractionMode.IsSuspended) return;    // a click on an overlay above us isn't "outside"
 
         if (Mouse.current.leftButton.wasPressedThisFrame || Mouse.current.rightButton.wasPressedThisFrame)
         {
@@ -101,23 +115,43 @@ public class DeviceAddressPopup : MonoBehaviour
         _prefix = (addr != null && addr.HasAddress) ? SubnetMath.MaskToPrefixLength(addr.Mask) : DefaultPrefix;
         if (_prefix < MinPrefix || _prefix > MaxPrefix) _prefix = DefaultPrefix;
         _ipField.text = (addr != null && addr.HasAddress) ? addr.Ip : "";
+        _httpToggle.isOn = addr == null || addr.AcceptsHttpRequest;
+        _fileToggle.isOn = addr == null || addr.AcceptsFileTransfer;
 
         RefreshMaskDisplay();
 
-        _panelRt.position = ClampToScreen(screenPos, _panelRt.sizeDelta);
+        // _panelRt itself is a FIXED size (set once in BuildPanel) and now sits
+        // at a fixed position within _panelWrapper — top edge glued to the
+        // wrapper's own top edge (wrapper is left-CENTER pivoted, so its local
+        // +fullHeight/2 is its top) — only the wrapper's height animates.
+        float fullHeight = _panelRt.sizeDelta.y;
+        _panelRt.anchoredPosition = new Vector2(0f, fullHeight * 0.5f);
+
+        var wrapperRt = _panelWrapper.GetComponent<RectTransform>();
+        wrapperRt.sizeDelta = new Vector2(_panelRt.sizeDelta.x, fullHeight);
+        Vector2 topLeft = ClampToScreen(screenPos, wrapperRt.sizeDelta);
+        wrapperRt.position = new Vector3(topLeft.x, topLeft.y - fullHeight * 0.5f, wrapperRt.position.z);
+
         _shownFrame        = Time.frameCount;
         _panelRoot.SetActive(true);
+
+        PanelRevealFX.Play(_panelWrapper, fullHeight, chipBorder,
+            _canvas.transform as RectTransform, _canvas.worldCamera);
     }
 
     public void Hide()
     {
-        if (_panelRoot != null) _panelRoot.SetActive(false);
+        if (_panelRoot == null || !_panelRoot.activeSelf) { _device = null; return; }
+        float fullHeight = _panelRt.sizeDelta.y;
+        PanelRevealFX.PlayClose(_panelWrapper, fullHeight, chipBorder,
+            _canvas.transform as RectTransform, _canvas.worldCamera,
+            () => { if (_panelRoot != null) _panelRoot.SetActive(false); });
         _device = null;
     }
 
     Vector2 ClampToScreen(Vector2 screenPos, Vector2 sizeDelta)
     {
-        float scale = _panelRoot.transform.parent.GetComponent<Canvas>().scaleFactor;
+        float scale = _canvas.scaleFactor;
         Vector2 scaledSize = sizeDelta * scale;
         float x = Mathf.Clamp(screenPos.x, 0f, Mathf.Max(0f, Screen.width - scaledSize.x));
         float y = Mathf.Clamp(screenPos.y, scaledSize.y, Screen.height);
@@ -136,12 +170,15 @@ public class DeviceAddressPopup : MonoBehaviour
     {
         string mask = SubnetMath.PrefixLengthToMask(_prefix);
         _maskLabel.text  = mask;
-        _cidrLabel.text  = $"/{_prefix}";
-        _hostsLabel.text = $"Usable hosts: {SubnetMath.UsableHostCount(_prefix)}";
+        _hostsLabel.text = $"Usable hosts: {SubnetMath.FormatHostCount(_prefix)}";
     }
 
     void Apply()
     {
+        // The PC this popup was opened on was removed while it was up —
+        // nothing left to apply to.
+        if (_device == null) { Hide(); return; }
+
         var addr = _device.GetComponent<DeviceAddress>();
         if (addr == null) addr = _device.gameObject.AddComponent<DeviceAddress>();
 
@@ -149,9 +186,26 @@ public class DeviceAddressPopup : MonoBehaviour
         if (!SubnetMath.IsDottedQuad(ip))
         {
             NotificationManager.Instance?.Notify("Invalid IP address format.", NotifyKind.Danger);
+            AudioManager.Instance?.PlaySfx(SfxId.Refusal);
             return;
         }
-        addr.SetAddress(ip, SubnetMath.PrefixLengthToMask(_prefix));
+        string mask = SubnetMath.PrefixLengthToMask(_prefix);
+        if (!SubnetMath.IsHostAddress(ip, mask))
+        {
+            NotificationManager.Instance?.Notify("That's this subnet's network or broadcast address, not a usable host address.", NotifyKind.Danger);
+            AudioManager.Instance?.PlaySfx(SfxId.Refusal);
+            return;
+        }
+        string conflict = AddressConflict.Find(ip, _device);
+        if (conflict != null)
+        {
+            NotificationManager.Instance?.Notify($"That address is already in use by {conflict}.", NotifyKind.Danger);
+            AudioManager.Instance?.PlaySfx(SfxId.Refusal);
+            return;
+        }
+        addr.SetAddress(ip, mask);
+        addr.SetAccepts(_httpToggle.isOn, _fileToggle.isOn);
+        AudioManager.Instance?.PlaySfx(SfxId.IpAssigned);
 
         // Mirrors RouterCLI.PushInterfaceState: an addressed interface counts as
         // "up" for Cable's ambient packet-flow cosmetic. PCs have exactly one port.
@@ -173,18 +227,40 @@ public class DeviceAddressPopup : MonoBehaviour
         scaler.uiScaleMode         = CanvasScaler.ScaleMode.ScaleWithScreenSize;
         UIScale.Register(scaler);
         canvasGo.AddComponent<GraphicRaycaster>();
+        _canvas = canvas;
+
+        // Reveal wrapper (same VHS/CRT power-on technique as CLIPanelManager,
+        // see PanelRevealFX) — masks the popup so Show() can animate it open
+        // from a thin centered line without resizing/squashing its content.
+        // Left-CENTER pivoted: position.x stays the popup's left edge
+        // (matching the old top-left placement math below) while position.y
+        // is the popup's vertical CENTER, so growing sizeDelta.y expands both
+        // up and down symmetrically instead of only downward.
+        _panelWrapper = MakeRect("AddressPanelWrapper", canvasGo.transform);
+        _panelWrapper.AddComponent<RectMask2D>();
+        _panelWrapper.GetComponent<RectTransform>().pivot = new Vector2(0f, 0.5f);
 
         // Panel root — the silver chamfered outer shell, same plate the router
         // CLI panel uses (see CLIPanelManager.BuildPanel) — everything else
         // (header text, terminal inset, buttons) sits on top of it.
-        _panelRoot = MakeRect("AddressPanel", canvasGo.transform);
+        _panelRoot = MakeRect("AddressPanel", _panelWrapper.transform);
+        OccupiesScreen.Add(_panelRoot, OccupantLayer.Panel); // tutorial callout/markers step around it while open
         var panelImg = _panelRoot.AddComponent<Image>();
         panelImg.sprite = PlateSpriteBuilder.GetSprite(panelFill, panelBorder, trimColor,
             borderThickness: 2, chamfer: 5, pixelScale: 5);
         panelImg.type = Image.Type.Sliced;
         _panelRt = _panelRoot.GetComponent<RectTransform>();
-        _panelRt.anchorMin = new Vector2(0f, 1f);
-        _panelRt.anchorMax = new Vector2(0f, 1f);
+        // Anchored to the WRAPPER's own pivot point (0, 0.5) — the wrapper's
+        // center, which never moves as its height animates open — not (0,1).
+        // Anchoring to a top edge that itself is a MOVING target (the wrapper
+        // grows symmetrically from its center, so a top-anchored child would
+        // be offset by fullHeight/2 from an edge that isn't where Show()'s
+        // math (anchoredPosition = (0, fullHeight/2), fixed once and never
+        // re-anchored) expects it — it was cropping the top half of the panel
+        // out of the mask entirely. pivot stays (0,1): AddRow/PlaceRow's own
+        // row math is relative to THIS rect's local space, unaffected.
+        _panelRt.anchorMin = new Vector2(0f, 0.5f);
+        _panelRt.anchorMax = new Vector2(0f, 0.5f);
         _panelRt.pivot     = new Vector2(0f, 1f);
         _panelRt.sizeDelta = PanelSize;
 
@@ -217,6 +293,7 @@ public class DeviceAddressPopup : MonoBehaviour
         var closeBtn = closeBtnGo.AddComponent<Button>();
         closeBtn.targetGraphic = closeImg;
         closeBtn.onClick.AddListener(Hide);
+        ButtonClickGlow.Attach(closeBtnGo, closeBtn, closeColor);
         var crt = closeBtnGo.GetComponent<RectTransform>();
         crt.anchorMin        = new Vector2(1, 0.5f);
         crt.anchorMax        = new Vector2(1, 0.5f);
@@ -279,21 +356,10 @@ public class DeviceAddressPopup : MonoBehaviour
         _maskLabel.alignment = TextAlignmentOptions.Center;
         _maskLabel.color     = textColor;
         var maskRt = _maskLabel.GetComponent<RectTransform>();
-        maskRt.anchorMin = new Vector2(0.17f, 0f);
-        maskRt.anchorMax = new Vector2(0.66f, 1f);
+        maskRt.anchorMin = new Vector2(0.15f, 0f);
+        maskRt.anchorMax = new Vector2(0.85f, 1f);
         maskRt.offsetMin = Vector2.zero;
         maskRt.offsetMax = Vector2.zero;
-
-        _cidrLabel = MakeTMP("CidrValue", stepperRow.transform);
-        _cidrLabel.font       = _font;
-        _cidrLabel.fontSize   = 13;
-        _cidrLabel.alignment  = TextAlignmentOptions.Center;
-        _cidrLabel.color      = GameTheme.Info;
-        var cidrRt = _cidrLabel.GetComponent<RectTransform>();
-        cidrRt.anchorMin = new Vector2(0.68f, 0f);
-        cidrRt.anchorMax = new Vector2(0.85f, 1f);
-        cidrRt.offsetMin = Vector2.zero;
-        cidrRt.offsetMax = Vector2.zero;
 
         var plusBtn = MakeStepperButton(stepperRow.transform, "+", new Vector2(0.85f, 0f), new Vector2(1f, 1f));
         plusBtn.onClick.AddListener(() => StepPrefix(1));
@@ -305,7 +371,21 @@ public class DeviceAddressPopup : MonoBehaviour
         _hostsLabel.fontSize  = 11;
         _hostsLabel.color     = labelColor;
         PlaceRow(_hostsLabel.GetComponent<RectTransform>(), y, 16);
+        y -= 24f;
+
+        var acceptsHeader = MakeTMP("AcceptsHeader", body.transform);
+        acceptsHeader.font = _font;
+        acceptsHeader.text = "Accepts incoming";
+        acceptsHeader.fontSize = 11;
+        acceptsHeader.color = labelColor;
+        PlaceRow(acceptsHeader.GetComponent<RectTransform>(), y, 16);
         y -= 20f;
+
+        _httpToggle = MakeToggleRow(body.transform, "HTTP Request", y);
+        y -= 22f;
+
+        _fileToggle = MakeToggleRow(body.transform, "File Transfer", y);
+        y -= 22f;
 
         // -y is the body plate's own top-down cursor; add back the 10px top
         // margin we started from so the plate wraps every row with even
@@ -323,6 +403,7 @@ public class DeviceAddressPopup : MonoBehaviour
         applyRt.anchoredPosition = new Vector2(0, footerY);
         applyRt.sizeDelta = new Vector2(-6, 28);
         applyBtn.onClick.AddListener(Apply);
+        ButtonClickGlow.Attach(applyBtn.gameObject, applyBtn, runFill);
 
         var cancelBtn = MakeTextButton(_panelRoot.transform, "Cancel", clearFill, clearBorder);
         var cancelRt = cancelBtn.GetComponent<RectTransform>();
@@ -332,6 +413,7 @@ public class DeviceAddressPopup : MonoBehaviour
         cancelRt.anchoredPosition = new Vector2(0, footerY);
         cancelRt.sizeDelta = new Vector2(-6, 28);
         cancelBtn.onClick.AddListener(Hide);
+        ButtonClickGlow.Attach(cancelBtn.gameObject, cancelBtn, clearFill);
 
         // footerY brings us to the Apply/Cancel row's own top edge; that row is
         // itself 28 tall and extends further down from there, so the panel
@@ -372,6 +454,7 @@ public class DeviceAddressPopup : MonoBehaviour
         tmp.color     = titleTextColor;
         StretchToFill(tmp.GetComponent<RectTransform>());
 
+        ButtonClickGlow.Attach(go, btn, chipBorder);
         return btn;
     }
 
@@ -429,6 +512,53 @@ public class DeviceAddressPopup : MonoBehaviour
         field.characterLimit = 15;
 
         return field;
+    }
+
+    // Checkbox + label row — a small chamfered box (SmallPlate) as the
+    // background, a smaller inset plate as the checkmark that Toggle shows/
+    // hides via its own isOn state, and a label filling the rest of the row.
+    Toggle MakeToggleRow(Transform parent, string label, float y)
+    {
+        var row = MakeRect("ToggleRow", parent);
+        PlaceRow(row.GetComponent<RectTransform>(), y, 18);
+
+        var boxGo = MakeRect("Box", row.transform);
+        var boxImg = boxGo.AddComponent<Image>();
+        boxImg.sprite = SmallPlate(fieldFill, fieldBorder);
+        boxImg.type   = Image.Type.Sliced;
+        var boxRt = boxGo.GetComponent<RectTransform>();
+        boxRt.anchorMin = new Vector2(0f, 0.5f);
+        boxRt.anchorMax = new Vector2(0f, 0.5f);
+        boxRt.pivot     = new Vector2(0f, 0.5f);
+        boxRt.sizeDelta = new Vector2(16, 16);
+
+        var checkGo = MakeRect("Checkmark", boxGo.transform);
+        var checkImg = checkGo.AddComponent<Image>();
+        checkImg.sprite = SmallPlate(textColor, textColor);
+        var checkRt = checkGo.GetComponent<RectTransform>();
+        checkRt.anchorMin = new Vector2(0.2f, 0.2f);
+        checkRt.anchorMax = new Vector2(0.8f, 0.8f);
+        checkRt.offsetMin = Vector2.zero;
+        checkRt.offsetMax = Vector2.zero;
+
+        var toggle = boxGo.AddComponent<Toggle>();
+        toggle.targetGraphic = boxImg;
+        toggle.graphic       = checkImg;
+        toggle.isOn          = true;
+
+        var labelTmp = MakeTMP("Label", row.transform);
+        labelTmp.font      = _font;
+        labelTmp.text      = label;
+        labelTmp.fontSize  = 12;
+        labelTmp.color     = labelColor;
+        labelTmp.alignment = TextAlignmentOptions.MidlineLeft;
+        var labelRt = labelTmp.GetComponent<RectTransform>();
+        labelRt.anchorMin = new Vector2(0f, 0f);
+        labelRt.anchorMax = new Vector2(1f, 1f);
+        labelRt.offsetMin = new Vector2(22, 0);
+        labelRt.offsetMax = Vector2.zero;
+
+        return toggle;
     }
 
     // Small chamfered plate for chips/buttons/the close icon — thin border,

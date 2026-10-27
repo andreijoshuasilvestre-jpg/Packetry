@@ -27,7 +27,7 @@ using UnityEngine;
 /// directly on TaskManager's own IsComplete tracking (registration order
 /// below == stage order) instead of re-polling the same conditions twice.
 /// </summary>
-public class Level3Guide : MonoBehaviour
+public class Level3Guide : MonoBehaviour, INarratedLevel
 {
     public static Level3Guide Instance { get; private set; }
 
@@ -39,6 +39,9 @@ public class Level3Guide : MonoBehaviour
         // device, so its pulse becomes a translucent echo of that device's
         // own model instead of a generic circle.
         public System.Func<NetworkDevice> WorldMarkerDevice;
+        // What the marker's mouse acts out at that spot (see MouseGesture) —
+        // RightClick where a device's popup/CLI opens that way.
+        public MouseGesture MarkerGesture = MouseGesture.Click;
 
         // Pulses an outline around the command to type/click next (falls
         // back to the input field itself if that command isn't in the
@@ -79,21 +82,38 @@ public class Level3Guide : MonoBehaviour
         yield return null;
 
         BuildStages();
+        // Runs here — one frame after scene load, well before NetworkUIManager
+        // actually queues its button reveal-flash (see StaggerRevealFlashChildren/
+        // QueueRevealFlash, deferred two more frames past construction) — so a
+        // tool this level hasn't unlocked yet is already inactive by the time
+        // that queueing decision runs, instead of flashing in and then vanishing.
         HideUnneededButtons();
 
-        // Level3SceneSetup's single Router builds in Awake(), earlier than
-        // this Start(), so it's already here by the time this scans.
+        // Level3SceneSetup's single Router (or a restored save's) — waits for
+        // GameBootstrap to report the starting topology in first, same as
+        // every guide, in case this level ever gets a template scene that
+        // merges in a frame or more after load.
+        while (!GameBootstrap.TopologyLoaded) yield return null;
         foreach (var device in Object.FindObjectsByType<NetworkDevice>(FindObjectsInactive.Exclude))
         {
             if (device.deviceType == DeviceType.Router && placedRouter == null) placedRouter = device;
         }
+
+        if (CLIPanelManager.Instance != null) CLIPanelManager.Instance.OnPanelOpened += HandleCliOpened;
 
         var tm = TaskManager.Instance;
         if (tm != null)
         {
             tm.OnTasksChanged += HandleTasksChanged;
 
-            // Registration order == guide stage order (see BuildStages).
+            // Registration order == guide stage order (see BuildStages), and
+            // completed strictly in that order — see TaskManager.CompleteInOrder.
+            tm.CompleteInOrder = true;
+            // Always starts the drill over rather than resuming it: every
+            // stage here is "get the CLI into mode X", and the CLI's mode is
+            // session-only — a resumed save would ask for e.g. `end` from a
+            // CLI that's back at `Router>`.
+            tm.DiscardRestoredProgress();
             tm.RegisterTask("Open the Router's CLI", () =>
                 CLIPanelManager.Instance != null && CLIPanelManager.Instance.CurrentDevice == placedRouter,
                 hintNudge: "The router is the boxy device already on the table.",
@@ -120,19 +140,28 @@ public class Level3Guide : MonoBehaviour
             // Checkpoint: no outline this time (see BuildStages) and a
             // different interface number than the one just practiced, so
             // this only completes if the player genuinely retained the
-            // enable -> configure terminal -> interface ethN sequence.
+            // configure terminal -> interface ethN sequence.
             tm.RegisterTask("Checkpoint: reach interface eth1 on your own", () => RouterInterfacePort() == 1,
-                hintNudge: "Retrace the same path as before: enable, then configure terminal, then interface.",
-                hintSpecific: "Same sequence as last time — just port 1 instead of port 0.",
-                hintAnswer: "`enable`, then `configure terminal`, then `interface eth1`");
+                hintNudge: "You're in Privileged EXEC — the same spot you were in right after `enable`. Retrace your steps from there.",
+                hintSpecific: "Go back into Global Config, then pick an interface — same as last time, just port 1 instead of port 0.",
+                hintAnswer: "`configure terminal`, then `interface eth1`");
         }
 
-        EnterStage(0);
+        // Hold off on this level's first guide annotation until the whole
+        // opening sequence has actually finished — see GameBootstrap.
+        // IntroSequenceReady.
+        while (!GameBootstrap.IntroSequenceReady) yield return null;
+
+        // Via HandleTasksChanged rather than EnterStage(0) directly, same as
+        // Level2Guide/Level4Guide — stage 0 in practice here, since this
+        // level never resumes progress (see DiscardRestoredProgress above).
+        HandleTasksChanged();
     }
 
     void OnDestroy()
     {
         if (TaskManager.Instance != null) TaskManager.Instance.OnTasksChanged -= HandleTasksChanged;
+        if (CLIPanelManager.Instance != null) CLIPanelManager.Instance.OnPanelOpened -= HandleCliOpened;
     }
 
     void Update()
@@ -151,10 +180,11 @@ public class Level3Guide : MonoBehaviour
             // it) — a world marker points at the pre-placed router.
             new() { Text = () => "Right-click the Router to open its command line.",
                      WorldMarker = () => placedRouter != null ? placedRouter.VisualTopPoint() : (Vector3?)null,
-                     WorldMarkerDevice = () => placedRouter },
+                     WorldMarkerDevice = () => placedRouter,
+                     MarkerGesture = MouseGesture.RightClick },
 
             // 1 — enable
-            new() { Text = () => "Type <b>enable</b> to enter Privileged EXEC mode. Most commands are locked until you do — it's how a real router keeps casual users from breaking its config. (Tip: type <b>?</b> anytime to see what's available.)",
+            new() { Text = () => "Type <b>enable</b> (or click it in the <b>Commands</b> list and press <b>Run</b>) to enter Privileged EXEC mode. Most commands are locked until you do — it's how a real router keeps casual users from breaking its config. (Tip: rest your mouse on any command to see what it does.)",
                      ShowCliHighlight = true, HighlightCommand = "enable" },
 
             // 2 — configure terminal
@@ -162,7 +192,7 @@ public class Level3Guide : MonoBehaviour
                      ShowCliHighlight = true, HighlightCommand = "configure terminal" },
 
             // 3 — interface eth0
-            new() { Text = () => "Type <b>interface eth0</b> to configure the first port. (Tip: press <key>Tab</key> to auto-complete, or drag a command in from the palette.)",
+            new() { Text = () => "Type <b>interface eth0</b> to configure the first port. (Tip: press <key>Tab</key> to auto-complete, or click the command in the <b>Commands</b> list.)",
                      ShowCliHighlight = true, HighlightCommand = "interface eth<N>" },
 
             // 4 — end, back out.
@@ -172,9 +202,10 @@ public class Level3Guide : MonoBehaviour
             // 5 — Checkpoint: no outline highlight (ShowCliHighlight left
             // false) and a different interface number, so the player has to
             // genuinely recall the sequence rather than follow the glow.
-            new() { Text = () => "<b>Checkpoint</b> — no hints this time. On your own, get the Router into <b>interface eth1</b>'s configuration mode.",
+            new() { Text = () => "<b>Checkpoint</b> — no outlines this time. You're back in Privileged EXEC — get the Router into <b>interface eth1</b>'s configuration mode on your own.",
                      WorldMarker = () => placedRouter != null ? placedRouter.VisualTopPoint() : (Vector3?)null,
-                     WorldMarkerDevice = () => placedRouter },
+                     WorldMarkerDevice = () => placedRouter,
+                     MarkerGesture = MouseGesture.RightClick },
         };
     }
 
@@ -184,6 +215,9 @@ public class Level3Guide : MonoBehaviour
     // HideUnneededButtons.
     void HideUnneededButtons()
     {
+        // Ctrl+Z is a tool too — see UndoManager.AvailableInThisLevel.
+        if (UndoManager.Instance != null) UndoManager.Instance.AvailableInThisLevel = false;
+
         var ui = NetworkUIManager.Instance;
         if (ui == null) return;
 
@@ -217,21 +251,39 @@ public class Level3Guide : MonoBehaviour
         // This level hides the whole sidebar (see HideUnneededButtons), so the
         // callout doesn't need the default sidebar-clearing gap — pull it in
         // closer to the left edge instead of leaving that space empty.
-        TutorialUIManager.Instance?.Show(stage.Text.Invoke(), null, buttonLabel: null, offsetX: 220f);
+        TutorialUIManager.Instance?.Show(stage.Text.Invoke(), null, buttonLabel: null, offsetX: 220f, progress: (index + 1, stages.Count));
 
         TutorialUIManager.Instance?.HideWorldMarkers();
         Vector3? marker = stage.WorldMarker?.Invoke();
-        if (marker.HasValue) TutorialUIManager.Instance?.ShowWorldMarker(0, marker.Value, stage.WorldMarkerDevice?.Invoke());
+        if (marker.HasValue) TutorialUIManager.Instance?.ShowWorldMarker(0, marker.Value, stage.WorldMarkerDevice?.Invoke(), stage.MarkerGesture);
 
-        if (stage.ShowCliHighlight)
+        ApplyCliHighlight(stage);
+    }
+
+    // Outlines + a chip → Command Queue drag trail for the stage's command.
+    // The trail resolves itself live (see CLIPanelManager.HighlightedCommandDragRoute),
+    // so it only appears while that command actually has a chip to drag.
+    // Also re-run whenever the panel (re)opens — Open() clears highlights, so
+    // closing and reopening the CLI mid-stage would otherwise lose them.
+    void ApplyCliHighlight(GuideStage stage)
+    {
+        var cli = CLIPanelManager.Instance;
+        if (stage != null && stage.ShowCliHighlight)
         {
-            CLIPanelManager.Instance?.SetHighlightedCommand(stage.HighlightCommand);
-            CLIPanelManager.Instance?.HighlightPrompt(true);
+            cli?.SetHighlightedCommand(stage.HighlightCommand);
+            cli?.HighlightPrompt(true);
+            if (cli != null) TutorialUIManager.Instance?.ShowDragGuide(cli.HighlightedCommandDragRoute);
         }
         else
         {
-            CLIPanelManager.Instance?.ClearHighlights();
+            cli?.ClearHighlights();
+            TutorialUIManager.Instance?.HideDragGuide();
         }
+    }
+
+    void HandleCliOpened(NetworkDevice device)
+    {
+        if (stages != null && stageIndex >= 0 && stageIndex < stages.Count) ApplyCliHighlight(stages[stageIndex]);
     }
 
     // ── Stage advance + completion ───────────────────────────────────────────
@@ -242,12 +294,16 @@ public class Level3Guide : MonoBehaviour
 
     void HandleTasksChanged()
     {
+        // Task registration fires this long before the entrance has
+        // finished — stage callouts wait for it (see InitNextFrame).
+        if (!GameBootstrap.IntroSequenceReady) return;
+
         var tasks = TaskManager.Instance.Tasks;
-        int completed = tasks.Count(t => t.IsComplete);
-        if (completed != stageIndex) EnterStage(completed);
+        int stage = TaskManager.Instance.CurrentTaskIndex;
+        if (stage != stageIndex) EnterStage(stage);
 
         if (completionHandled) return;
-        if (tasks.Count == 0 || completed < tasks.Count) return;
+        if (tasks.Count == 0 || stage < tasks.Count) return;
 
         completionHandled = true;
         TutorialUIManager.Instance?.Hide();
@@ -264,8 +320,7 @@ public class Level3Guide : MonoBehaviour
             "Back to Level Select",
             () =>
             {
-                MainMenuBootstrap.OpenLevelSelectOnLoad = true;
-                LoadingScreenManager.LoadScene("MainMenu", "LOADING LEVEL SELECT");
+                LoadingScreenManager.ExitToLevelSelect();
             },
             stars);
     }

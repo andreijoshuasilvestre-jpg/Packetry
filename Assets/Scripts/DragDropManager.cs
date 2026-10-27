@@ -1,24 +1,35 @@
+using System.Collections;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.EventSystems;
 
 /// <summary>
-/// Handles drag-and-drop of network devices from the palette onto the game plane,
-/// plus click-to-select/rotate and hold-to-drag for already-placed devices.
+/// Handles press-and-hold drag-and-drop of network devices (PC/Switch/Router)
+/// from the palette onto the game plane, plus click-to-select/rotate and
+/// hold-to-drag for already-placed devices. Dragging is never a sticky mode:
+/// it only lasts as long as the left button is physically held.
 ///
 /// Flow:
-///   1. User clicks a palette item → StartDragging() instantiates a clone.
-///   2. Clone follows the cursor, resting flush on whatever surface (table or
-///      ground) is under it.
-///   3. User clicks anywhere on the ground → clone is released;
-///      Rigidbody gravity drops it onto the plane.
+///   1. User presses on a palette item (sidebar button or in-world model) →
+///      StartDragging() instantiates a clone, hidden for now.
+///   2. Once the mouse has actually moved (see dragArmed) and the cursor is
+///      out over the field — not over UI, and over a real surface — the clone
+///      appears under the cursor and follows it, resting flush on whatever
+///      surface (table or ground) is under it. Moving back over UI (e.g. the
+///      sidebar) hides it again.
+///   3. Releasing the button drops it there (Rigidbody gravity settles it).
+///      Releasing while it's hidden (a plain click, or back over UI), on an
+///      invalid spot, or right-clicking mid-drag cancels instead — nothing is
+///      ever placed somewhere the player couldn't see it under the cursor.
 ///
 /// Placed devices:
 ///   - A quick left-click selects/deselects the device (cyan highlight); while
 ///     selected, holding R and scrolling freely rotates it in place without
 ///     picking it up.
-///   - Holding the left click down for <dragHoldInterval> seconds instead picks
-///     the device up and enters the same drag flow as a fresh palette item.
+///   - Holding the left click down for <dragHoldInterval> seconds (or moving
+///     the mouse past pickupMoveThreshold while held) instead picks the device
+///     up; releasing drops it, same as a fresh palette item. Cancelling snaps
+///     it back to where it was picked up from.
 /// </summary>
 public class DragDropManager : MonoBehaviour
 {
@@ -33,8 +44,8 @@ public class DragDropManager : MonoBehaviour
     public event System.Action<NetworkDevice, bool> OnDeviceDropped;
 
     [SerializeField] private float gridCellSize = 1f;
-    // Must match GameBootstrap planeScale * 5 (1.5 * 5 = 7.5)
-    [SerializeField] private float playAreaHalfExtent = 7.5f;
+    // Must match GameBootstrap planeScale * 5 (1.8 * 5 = 9)
+    [SerializeField] private float playAreaHalfExtent = 9f;
 
     [Header("Drag hologram")]
     // Neutral white tint — the grid texture itself now bakes in the blueprint's
@@ -54,7 +65,7 @@ public class DragDropManager : MonoBehaviour
     // How long (seconds) the left button must be held on a placed device before
     // it's picked up for dragging; releasing sooner is treated as a select click.
     [SerializeField] private float dragHoldInterval = 0.35f;
-    // Delay after an already-placed device is picked up before the "click to
+    // Delay after an already-placed device is picked up before the "release to
     // place it down" status-bar hint appears (see ShowRepositionHint). Keeps
     // the pickup reading as two distinct beats — the hologram/port-arrow
     // indicator pops immediately, the text hint follows a moment later —
@@ -78,7 +89,6 @@ public class DragDropManager : MonoBehaviour
     private GameObject draggingObject;
     private PaletteItem hoveredItem;
     private bool isDragging;
-    private int dragStartFrame = -1; // prevents same-frame drop
     private bool isNewDevice; // true = fresh palette instance (cancel destroys it); false = repositioning (cancel snaps back)
     private Vector3 dragStartPosition;
     private Quaternion dragStartRotation;
@@ -104,12 +114,23 @@ public class DragDropManager : MonoBehaviour
     private bool wasShiftHeld;
     private Vector3 shiftAxisAnchor; // position axis-locking is measured from; re-captured each time Shift is (re)pressed
 
-    // Sticky palette placement: once a palette item is picked, placement mode stays
-    // active across drops so the player can place several of the same device in a
-    // row without returning to the palette each time. Right-click (CancelDrag) is
-    // what ends the mode, same gesture as every other toggle-style manager.
-    private bool devicePlacementActive;
-    private DeviceType placementDeviceType;
+    // A fresh palette press only becomes a real drag once the mouse has
+    // travelled pickupMoveThreshold from where it went down — until then the
+    // ghost stays hidden and a release cancels. Without this a plain click
+    // could place a device: pressing a flyout item swaps it into the sidebar
+    // (CompoundSidebarGroup.SelectFace), leaving the cursor over bare field
+    // with a ghost already under it, so the release landed as a drop.
+    // Repositioning is armed from the start (its pickup already needed a
+    // hold or a move — see HandlePlacedDevicePress).
+    private bool dragArmed;
+    private Vector2 dragPressScreen;
+    // True when this frame's MoveDraggingObject() found a real surface under
+    // an armed cursor that isn't over UI — i.e. the dragged object is sitting
+    // exactly where the player sees the cursor. Drop() refuses otherwise.
+    private bool hasLiveDragPoint;
+    // Renderers switched off while a fresh ghost is hidden (see SetGhostVisible),
+    // so exactly those — not any a model keeps disabled on purpose — come back on.
+    private readonly System.Collections.Generic.List<Renderer> hiddenGhostRenderers = new();
 
     // Renderers currently wearing the hologram material while draggingObject is
     // live, and what to restore them to once it's placed/cancelled.
@@ -137,24 +158,16 @@ public class DragDropManager : MonoBehaviour
     private NetworkDevice highlightedDevice;
     private NetworkDevice pendingPickDevice;
     private float pressStartTime;
+    private Vector2 pressStartScreen;
+    // Screen-space distance the mouse can travel while pressed on a placed
+    // device before it's picked up early, without waiting out dragHoldInterval
+    // — lets a quick press-and-drag feel immediate, while a stationary quick
+    // click still reads as a select. Also the distance a fresh palette press
+    // must travel before its ghost arms (see dragArmed).
+    private const float pickupMoveThreshold = 8f;
     // Time.time when an already-placed device was picked up — see
     // ShowRepositionHint / repositionHintDelay.
     private float repositionPickupTime;
-
-    // Lets a straight press-drag-release gesture (e.g. clicking and dragging an
-    // in-world palette item, or holding a placed device past dragHoldInterval)
-    // complete the same way the click-then-click-again flow does, instead of
-    // leaving the ghost stuck in its hologram material forever because Drop()
-    // never got a second click. Only armed when the drag actually started from
-    // a still-held button (see ArmDragReleaseIfHeld) — a drag started from an
-    // already-released click, like a sidebar button whose onClick fires on
-    // pointer-up, is deliberately left unarmed so that flow keeps working as
-    // click-to-arm/click-to-place.
-    private bool dragReleaseArmed;
-    private Vector2 dragPressStartScreen;
-    // Screen-space mouse movement past which a held-and-released drag counts as
-    // a deliberate "drop it here" rather than an incidental tap/jitter.
-    private const float dragReleaseThreshold = 24f;
 
     // Camera state saved the moment the first device gets highlighted, so it can
     // be restored exactly once all highlighting ends (switching between two
@@ -166,6 +179,10 @@ public class DragDropManager : MonoBehaviour
     private float _savedYaw;
 
     public bool IsDragging => isDragging;
+    // Whether go specifically is the object in hand right now — lets code that
+    // changes a device's physics from outside a drag (UndoManager settling a
+    // restored device) leave one the player has already picked back up alone.
+    public bool IsHolding(GameObject go) => isDragging && go != null && draggingObject == go;
     public bool HasHighlightedDevice => highlightedDevice != null;
     // The currently selected (highlighted) placed device, if any — read-only,
     // used by TutorialManager to detect the player rotating a device in place
@@ -174,12 +191,16 @@ public class DragDropManager : MonoBehaviour
     public float GridCellSize => gridCellSize;
     public float PlayAreaHalfExtent => playAreaHalfExtent;
 
+    // Called once by GameBootstrap.SetupManagers right after this component
+    // is created, so the placement-bounds clamp matches whatever size plane
+    // SetupPlayArea actually built for the current level (see its
+    // playAreaHalfExtent field) instead of always assuming the default 9.
+    public void SetPlayAreaHalfExtent(float halfExtent) => playAreaHalfExtent = halfExtent;
+
     // Type of whatever's currently under the cursor — a fresh palette ghost or an
     // already-placed device being repositioned. Read from the live dragged object
-    // rather than placementDeviceType, since PickUpPlacedDevice (repositioning)
-    // never touches that field and would otherwise report a stale/wrong type.
-    // Used by NetworkUIManager to keep the matching sidebar button lit while
-    // device-placement mode is active.
+    // so both cases report the right type. Used by NetworkUIManager to keep the
+    // matching sidebar button lit while a device is being held.
     public DeviceType? DraggingDeviceType =>
         isDragging && draggingObject != null
             ? draggingObject.GetComponent<NetworkDevice>()?.deviceType
@@ -191,11 +212,18 @@ public class DragDropManager : MonoBehaviour
     public bool IsRepositioning => isDragging && !isNewDevice;
 
     // True once a repositioned device has been held for repositionHintDelay
-    // seconds — i.e. it's time to show the "click to place it down" hint.
+    // seconds — i.e. it's time to show the "release to place it down" hint.
     // False for the brief instant right after pickup, so the hologram/
     // port-arrow indicator reads as popping up on its own first.
     public bool ShowRepositionHint =>
         IsRepositioning && Time.time - repositionPickupTime >= repositionHintDelay;
+
+    // True while a drag is live AND the dragged object is out on the field
+    // under the cursor — releasing now would drop it (spot validity aside).
+    // False while a fresh ghost is still hidden (not yet dragged off its
+    // button, or back over UI), where releasing cancels instead — used by
+    // NetworkUIManager to word the status bar accordingly.
+    public bool IsOverField => isDragging && hasLiveDragPoint;
 
     void Awake()
     {
@@ -214,55 +242,40 @@ public class DragDropManager : MonoBehaviour
 
     void Update()
     {
+        if (GameBootstrap.ExitStarted) return; // leaving the level — a click mustn't reopen a panel mid-exit
         if (CLIPanelManager.Instance != null && CLIPanelManager.Instance.IsOpen) return;
-        if (SettingsPanelManager.Instance != null && SettingsPanelManager.Instance.IsOpen) return;
+        if (InteractionMode.IsSuspended)
+        {
+            // Unlike the click-driven modes, a press-and-hold drag can't just
+            // freeze: the release that dismisses the overlay would drop the
+            // device wherever its button sits. Put it back instead.
+            if (isDragging) CancelDrag();
+            return;
+        }
 
         if (isDragging)
         {
+            // The object in hand was destroyed out from under the drag — end
+            // it now rather than waiting on a release that has nothing left
+            // to drop (see CancelDrag).
+            if (draggingObject == null) { CancelDrag(); return; }
+
             MoveDraggingObject();
             HandleFreeRotation(draggingObject);
 
-            // wasPressedThisFrame = "click to place" — also skip the frame drag started
-            // (sidebar onClick fires on release; PickUpPlacedDevice fires on press;
-            //  in both cases the same-frame guard prevents an accidental immediate drop)
-            // IsPointerOverUI guard: without it, re-clicking the sidebar button that started
-            // this drag drops the device under the button and the button's onClick immediately
-            // starts a new drag, duplicating devices on top of each other on every click.
-            if (Time.frameCount != dragStartFrame && Mouse.current.leftButton.wasPressedThisFrame && !IsPointerOverUI())
-            {
-                // Clicking on an already-placed device instead ends the current
-                // placement/reposition and hands the click straight to the normal
-                // select / hold-to-drag gesture (see HandlePlacedDevicePress),
-                // rather than dropping a duplicate copy on top of it. This is what
-                // lets the player go straight from "still holding a ghost" to
-                // "selecting a placed device" without an explicit cancel step.
-                NetworkDevice clickedPlaced = RaycastForDevice();
-                if (clickedPlaced != null)
-                {
-                    CancelDrag();
-                    pendingPickDevice = clickedPlaced;
-                    pressStartTime = Time.time;
-                }
-                else
-                {
-                    Drop();
-                }
-            }
-
-            // Completes a press-drag-release gesture the same way a second click
-            // would — see dragReleaseArmed. Ignored once the ghost has already
-            // been handed off to the "click again to drop" branch above (that
-            // branch either drops or re-arms pendingPickDevice, and either way
-            // isDragging may already be false by the time this runs this frame).
-            if (isDragging && dragReleaseArmed && Mouse.current.leftButton.wasReleasedThisFrame)
-            {
-                dragReleaseArmed = false;
-                float moved = Vector2.Distance(dragPressStartScreen, Mouse.current.position.ReadValue());
-                if (moved >= dragReleaseThreshold && !IsPointerOverUI()) Drop();
-            }
-
+            // Press-and-hold: the drag only lives while the left button is held.
+            // Checked as !isPressed (not wasReleasedThisFrame) so a release that
+            // slipped past between the press and StartDragging still ends it.
+            // Releasing anywhere Drop() refuses — over UI (e.g. back onto the
+            // sidebar), off the field, before the ghost ever armed, or on an
+            // invalid spot — puts it back instead of dropping.
             if (Mouse.current.rightButton.wasPressedThisFrame)
                 CancelDrag();
+            else if (!Mouse.current.leftButton.isPressed)
+            {
+                if (!Drop())
+                    CancelDrag();
+            }
         }
         else if ((CableManager.Instance == null || !CableManager.Instance.IsConnecting) &&
                  (CableRemoverManager.Instance == null || !CableRemoverManager.Instance.IsRemoving) &&
@@ -270,6 +283,7 @@ public class DragDropManager : MonoBehaviour
                  (TableRemoverManager.Instance == null || !TableRemoverManager.Instance.IsRemoving) &&
                  (TableManager.Instance == null || !TableManager.Instance.IsPlacing) &&
                  (TableManager.Instance == null || !TableManager.Instance.IsDragging) &&
+                 (TableManager.Instance == null || !TableManager.Instance.IsResizing) &&
                  (PingToolManager.Instance == null || !PingToolManager.Instance.IsPinging) &&
                  (PacketSendManager.Instance == null || !PacketSendManager.Instance.IsSending) &&
                  (TutorialManager.Instance == null || !TutorialManager.Instance.IsCameraOnlyStep))
@@ -318,6 +332,9 @@ public class DragDropManager : MonoBehaviour
     {
         if (Mouse.current.leftButton.wasPressedThisFrame && !IsPointerOverUI())
         {
+            // A selected table's resize handle is TableManager's to grab —
+            // a device under it on screen mustn't also get picked up.
+            if (TableManager.Instance != null && TableManager.Instance.IsPointerOverResizeHandle) return;
             if (TryPickFromPalette()) return;
 
             NetworkDevice device = RaycastForDevice();
@@ -325,6 +342,7 @@ public class DragDropManager : MonoBehaviour
             {
                 pendingPickDevice = device;
                 pressStartTime = Time.time;
+                pressStartScreen = Mouse.current.position.ReadValue();
             }
             else
             {
@@ -341,7 +359,8 @@ public class DragDropManager : MonoBehaviour
             pendingPickDevice = null;
             SetHighlighted(highlightedDevice == clicked ? null : clicked);
         }
-        else if (Time.time - pressStartTime >= dragHoldInterval)
+        else if (Time.time - pressStartTime >= dragHoldInterval ||
+                 Vector2.Distance(pressStartScreen, Mouse.current.position.ReadValue()) >= pickupMoveThreshold)
         {
             NetworkDevice device = pendingPickDevice;
             pendingPickDevice = null;
@@ -375,17 +394,6 @@ public class DragDropManager : MonoBehaviour
         }
     }
 
-    // Arms dragReleaseArmed only if the button that led to this drag is still
-    // physically held — true for a direct press-and-drag (in-world palette
-    // item, or holding a placed device past dragHoldInterval), false for a
-    // drag started from a click that already finished (e.g. a sidebar
-    // button's onClick, which fires on pointer-up).
-    void ArmDragReleaseIfHeld()
-    {
-        dragReleaseArmed = Mouse.current.leftButton.isPressed;
-        if (dragReleaseArmed) dragPressStartScreen = Mouse.current.position.ReadValue();
-    }
-
     void PickUpPlacedDevice(GameObject go)
     {
         if (isDragging) return;
@@ -402,9 +410,9 @@ public class DragDropManager : MonoBehaviour
         if (rb != null) rb.isKinematic = true;
 
         isDragging = true;
-        dragStartFrame = Time.frameCount;
         repositionPickupTime = Time.time;
         wasShiftHeld = false;
+        dragArmed = true; // the hold/move that triggered this pickup already proved it's a drag
         dragAnchorHeight = ComputeAnchorHeight(draggingObject);
         dragGrabOffset = TryGetAnchorPoint(out Vector3 startAnchor)
             ? new Vector3(dragStartPosition.x - startAnchor.x, 0f, dragStartPosition.z - startAnchor.z)
@@ -416,7 +424,6 @@ public class DragDropManager : MonoBehaviour
         // Built after ApplyHologram so its outline shells aren't among the
         // renderers that call swaps onto the hologram ghost material.
         selectionIndicator?.ShowDragging(draggingObject.transform);
-        ArmDragReleaseIfHeld();
         MoveDraggingObject();
     }
 
@@ -531,35 +538,22 @@ public class DragDropManager : MonoBehaviour
     public void ClearHighlight() => SetHighlighted(null);
 
     // Called by InteractionMode when a different mode/tool takes over, so a
-    // pending sticky-placement ghost (or an in-progress reposition) doesn't
+    // held placement ghost (or an in-progress reposition) doesn't
     // linger once something else claims input — same idea as ClearHighlight,
     // just for the active drag instead of the selection.
     public void CancelDragging() => CancelDrag();
 
     // ── Drag lifecycle ───────────────────────────────────────────────────────
 
+    // Must be called from a left-button PRESS (sidebar LeftPressHandler, or an
+    // in-world palette item's press) — the ghost lives only while that button
+    // stays held, and is dropped/cancelled on release (see Update).
     public void StartDragging(DeviceType type)
     {
         if (TutorialManager.Instance != null && !TutorialManager.Instance.IsDeviceAllowed(type)) return;
         if (Level4Guide.Instance != null && !Level4Guide.Instance.IsDeviceAllowed(type)) return;
 
-        if (isDragging)
-        {
-            // Already placing/repositioning something. Clicking the same sticky
-            // device type again is a no-op (it's already the live ghost); clicking
-            // a different device switches straight to it instead of being ignored
-            // — CancelDrag() drops the stale ghost (or snaps a reposition back)
-            // before the fresh drag below starts.
-            if (isNewDevice && placementDeviceType == type) return;
-            CancelDrag();
-        }
-
-        // Sticky placement mode: whoever asked for this device (sidebar button or
-        // world palette click) stays "live" across drops — see Drop() — so every
-        // entry point that spawns a fresh ghost needs to arm it here, not just the
-        // one that happened to be wired up first.
-        placementDeviceType = type;
-        devicePlacementActive = true;
+        if (isDragging) CancelDrag();
 
         InteractionMode.CancelOthers(this);
         SetHighlighted(null);
@@ -570,6 +564,9 @@ public class DragDropManager : MonoBehaviour
 
         draggingObject.SetActive(true);
         draggingObject.name = type.ToString();
+        // Before ApplyHologram, so the ghost and its port-side arrow start out
+        // already facing the player.
+        draggingObject.transform.rotation = Quaternion.Euler(0f, FacingYawForCamera(), 0f);
 
         var nd = draggingObject.GetComponent<NetworkDevice>();
         if (nd != null) nd.isPaletteItem = false;
@@ -580,13 +577,29 @@ public class DragDropManager : MonoBehaviour
 
         isNewDevice = true;
         isDragging = true;
-        dragStartFrame = Time.frameCount;
         wasShiftHeld = false;
+        dragArmed = false; // see dragArmed — a press alone never places anything
+        dragPressScreen = Mouse.current.position.ReadValue();
         dragAnchorHeight = ComputeAnchorHeight(draggingObject);
         dragGrabOffset = Vector3.zero; // fresh device — no prior position to preserve, so it appears under the cursor
         ApplyHologram(draggingObject);
-        ArmDragReleaseIfHeld();
+        // Hides the ghost before it's ever rendered: BuildTemplate leaves it at
+        // the world origin (the middle of the plane), and the cursor is still
+        // over the sidebar button, so there's nowhere honest to show it yet.
         MoveDraggingObject();
+    }
+
+    // A fresh device arrives with its front toward the player, whichever way
+    // the view has been turned (Q/E). Every model's front — the PC's screen,
+    // the switch's and router's port face — is its local -Z (see
+    // DevicePrefabBuilder), so facing the camera head-on means matching the
+    // camera's yaw exactly — including the 45° in-between angles, so devices
+    // placed from there sit diagonally on the tables.
+    // Repositioning a placed device keeps whatever rotation it already has.
+    static float FacingYawForCamera()
+    {
+        float cameraYaw = IsometricCamera.Instance != null ? IsometricCamera.Instance.TargetYaw : 90f;
+        return Mathf.Repeat(cameraYaw, 360f);
     }
 
     // Raycasts the mouse against the actual (bounded) ground collider, and
@@ -695,8 +708,21 @@ public class DragDropManager : MonoBehaviour
     {
         if (draggingObject == null) return;
 
-        if (TryGetAnchorPoint(out Vector3 anchorPoint))
+        if (!dragArmed &&
+            Vector2.Distance(dragPressScreen, Mouse.current.position.ReadValue()) >= pickupMoveThreshold)
+            dragArmed = true;
+
+        // Only follows the cursor while it's genuinely out on the field. Over
+        // UI the ground ray would still land somewhere hidden behind the
+        // panel (or miss the plane and leave the object wherever it was), so
+        // the object holds still instead — a fresh ghost hides (see below), a
+        // repositioned device freezes and tints invalid until the cursor
+        // comes back.
+        hasLiveDragPoint = false;
+        if (dragArmed && !IsPointerOverUI() && TryGetAnchorPoint(out Vector3 anchorPoint))
         {
+            hasLiveDragPoint = true;
+
             // Carry the grab offset captured at pickup so the device moves
             // by the same amount the mouse does, rather than snapping to be
             // centered on the cursor (see dragGrabOffset).
@@ -710,9 +736,12 @@ public class DragDropManager : MonoBehaviour
 
             // Holding Shift locks movement to whichever of X/Z has moved further
             // from the point Shift was pressed, for straight horizontal/vertical runs.
+            // Anchored at this frame's own unlocked point rather than the
+            // object's current position — a ghost that was hidden last frame
+            // is still parked at its spawn point, not under the cursor.
             bool shiftHeld = Keyboard.current != null &&
                 (Keyboard.current.leftShiftKey.isPressed || Keyboard.current.rightShiftKey.isPressed);
-            if (shiftHeld && !wasShiftHeld) shiftAxisAnchor = draggingObject.transform.position;
+            if (shiftHeld && !wasShiftHeld) shiftAxisAnchor = placed;
             wasShiftHeld = shiftHeld;
             if (shiftHeld)
             {
@@ -728,7 +757,32 @@ public class DragDropManager : MonoBehaviour
             draggingObject.transform.position = placed;
         }
 
+        // Positioned first, so the frame a fresh ghost reappears it's already
+        // under the cursor rather than flashing wherever it was parked.
+        if (isNewDevice) SetGhostVisible(hasLiveDragPoint);
         UpdatePlacementTint();
+    }
+
+    // Hides/shows a fresh palette ghost without deactivating it — toggling
+    // the GameObject would re-fire NetworkDevice's OnEnable/OnDisable
+    // registry every time the cursor crosses the sidebar edge.
+    void SetGhostVisible(bool visible)
+    {
+        if (visible)
+        {
+            foreach (var r in hiddenGhostRenderers)
+                if (r != null) r.enabled = true;
+            hiddenGhostRenderers.Clear();
+        }
+        else if (hiddenGhostRenderers.Count == 0 && draggingObject != null)
+        {
+            foreach (var r in draggingObject.GetComponentsInChildren<Renderer>())
+            {
+                if (!r.enabled) continue;
+                r.enabled = false;
+                hiddenGhostRenderers.Add(r);
+            }
+        }
     }
 
     // ── Hologram ghost ───────────────────────────────────────────────────────
@@ -782,6 +836,7 @@ public class DragDropManager : MonoBehaviour
     // hologram instances — called right before a drag ends, one way or another.
     void RestoreFromHologram()
     {
+        SetGhostVisible(true);
         if (hologramRenderers == null) return;
 
         for (int i = 0; i < hologramRenderers.Length; i++)
@@ -813,8 +868,10 @@ public class DragDropManager : MonoBehaviour
         var nd = draggingObject.GetComponent<NetworkDevice>();
         bool onValidTable = nd == null || !nd.requiresTable || Table.AnyContains(draggingObject.transform.position);
 
+        // No live point = releasing now cancels (only ever visible on a
+        // repositioned device — a fresh ghost is hidden then), so say so.
         Color tint;
-        if (!onValidTable || WouldOverlapDevice(draggingObject))
+        if (!hasLiveDragPoint || !onValidTable || WouldOverlapDevice(draggingObject))
             tint = hologramInvalidColor;
         else if (nd != null && nd.requiresTable)
             tint = hologramValidColor;
@@ -868,6 +925,74 @@ public class DragDropManager : MonoBehaviour
         target.transform.Rotate(Vector3.up, degrees, Space.World);
     }
 
+    // ── Stepped rotation (DeviceRotateHud's buttons) ─────────────────────────
+
+    /// <summary>How far one rotate-button press turns the selected device.</summary>
+    public const float RotateStepDegrees = 45f;
+    const float RotateStepDuration = 0.15f;
+
+    private Coroutine rotateStepRoutine;
+    private Transform rotateStepTransform;
+    private float rotateStepTargetYaw;
+
+    /// <summary>Whether the selected device can be turned right now — the same
+    /// state hold-R-and-scroll works in: a placed device selected, nothing in
+    /// hand, no panel or overlay up.</summary>
+    public bool CanRotateHighlighted =>
+        highlightedDevice != null && !isDragging && !GameBootstrap.ExitStarted &&
+        !InteractionMode.IsSuspended &&
+        (CLIPanelManager.Instance == null || !CLIPanelManager.Instance.IsOpen);
+
+    /// <summary>Turns the selected device to the next 45° mark — clockwise seen
+    /// from above for direction &gt; 0 (Unity's +Y), counter-clockwise for &lt; 0 —
+    /// with a short ease rather than a jump. Lands on whole marks, so a device
+    /// left at an odd angle by R+scroll snaps onto the next one instead of
+    /// keeping its offset forever. Presses made mid-turn queue up from where
+    /// that turn is heading, not where the device happens to be.</summary>
+    public void RotateHighlighted(int direction)
+    {
+        if (!CanRotateHighlighted || direction == 0) return;
+
+        Transform t = highlightedDevice.transform;
+        bool continuing = rotateStepRoutine != null && rotateStepTransform == t;
+        float from = continuing ? rotateStepTargetYaw : t.eulerAngles.y;
+
+        const float epsilon = 0.01f; // "already on a mark" tolerance
+        float steps = from / RotateStepDegrees;
+        float target = direction > 0
+            ? (Mathf.Floor(steps + epsilon) + 1f) * RotateStepDegrees
+            : (Mathf.Ceil(steps - epsilon) - 1f) * RotateStepDegrees;
+
+        if (rotateStepRoutine != null)
+        {
+            StopCoroutine(rotateStepRoutine);
+            if (rotateStepTransform != null && rotateStepTransform != t) SetYaw(rotateStepTransform, rotateStepTargetYaw);
+        }
+        rotateStepTransform = t;
+        rotateStepTargetYaw = target;
+        rotateStepRoutine = StartCoroutine(TweenYaw(t, target));
+    }
+
+    IEnumerator TweenYaw(Transform t, float targetYaw)
+    {
+        float startYaw = t.eulerAngles.y;
+        for (float e = 0f; e < RotateStepDuration; e += Time.unscaledDeltaTime)
+        {
+            if (t == null) { rotateStepRoutine = null; yield break; }
+            float p = 1f - Mathf.Pow(1f - e / RotateStepDuration, 3f); // ease-out cubic
+            SetYaw(t, Mathf.LerpAngle(startYaw, targetYaw, p));
+            yield return null;
+        }
+        if (t != null) SetYaw(t, targetYaw);
+        rotateStepRoutine = null;
+    }
+
+    static void SetYaw(Transform t, float yaw)
+    {
+        Vector3 e = t.eulerAngles;
+        t.rotation = Quaternion.Euler(e.x, yaw, e.z);
+    }
+
     Vector3 SnapToGrid(Vector3 pos)
     {
         float x = Mathf.Round(pos.x / gridCellSize) * gridCellSize;
@@ -884,15 +1009,27 @@ public class DragDropManager : MonoBehaviour
         return pos;
     }
 
-    void Drop()
+    // Returns false (leaving the drag untouched) if the current spot is
+    // invalid — the caller cancels in that case; the red tint already showed why.
+    bool Drop()
     {
-        if (draggingObject == null) return;
+        if (draggingObject == null) return false;
+        if (!hasLiveDragPoint)
+            return false; // not under the cursor out on the field — over UI, off the plane, or never dragged at all
 
+        // Out on the field but on an invalid spot is a refusal (unlike the
+        // over-UI/off-field release above, which is the player putting it back).
         var nd = draggingObject.GetComponent<NetworkDevice>();
         if (nd != null && nd.requiresTable && !Table.AnyContains(draggingObject.transform.position))
-            return; // invalid spot — keep dragging; red tint already shows why
+        {
+            AudioManager.Instance?.PlaySfx(SfxId.Refusal);
+            return false; // not on a table
+        }
         if (WouldOverlapDevice(draggingObject))
-            return; // would clip into another device — keep dragging; red tint already shows why
+        {
+            AudioManager.Instance?.PlaySfx(SfxId.Refusal);
+            return false; // would clip into another device
+        }
 
         RestoreFromHologram();
         selectionIndicator?.Hide(); // no-op if this was a fresh placement, which never showed it
@@ -900,53 +1037,50 @@ public class DragDropManager : MonoBehaviour
         var rb = draggingObject.GetComponent<Rigidbody>();
         if (rb != null) rb.isKinematic = false; // gravity takes it down
 
+        // Fresh placement or a pre-placed device being set back down alike.
+        AudioManager.Instance?.PlaySfx(SfxId.Place);
+
         if (isNewDevice)
         {
             // Pronounced squeeze-bounce fires the instant the reveal's final
             // (solidify) phase starts, so the "landing" pop and the blueprint
             // actually turning solid read as one simultaneous beat.
             ConstructionRevealEffect.Play(draggingObject,
-                onFinalPhaseStart: nd != null ? () => PacketDeviceEffect.Play(nd, Color.white, PacketDeviceEffect.PlacementIntensity) : null);
+                onFinalPhaseStart: nd != null ? () => PacketDeviceEffect.Play(nd, Color.white, PacketDeviceEffect.PlacementIntensity, AnimationKind.Build) : null);
         }
         else if (nd != null)
         {
             // Repositioning an already-placed device skips the reveal but still
             // gets the same pronounced pop as soon as it's dropped.
-            PacketDeviceEffect.Play(nd, Color.white, PacketDeviceEffect.PlacementIntensity);
+            PacketDeviceEffect.Play(nd, Color.white, PacketDeviceEffect.PlacementIntensity, AnimationKind.Build);
         }
 
         if (nd != null) OnDeviceDropped?.Invoke(nd, isNewDevice);
 
-        // Sticky placement mode: a fresh palette device that just landed spawns
-        // its replacement ghost immediately instead of ending the drag, so the
-        // player can keep placing the same device without re-clicking the palette.
-        bool continuePlacement = isNewDevice && devicePlacementActive;
-        DeviceType typeToContinue = placementDeviceType;
-
         draggingObject = null;
         isDragging = false;
-
-        if (continuePlacement)
-            StartDragging(typeToContinue);
+        return true;
     }
 
-    // Right-click while dragging: discard a fresh palette instance, or snap a
-    // repositioned device back to where it was picked up from. Also the one
-    // gesture that ends sticky palette placement mode.
+    // Right-click mid-drag, or releasing over UI / an invalid spot: discard a
+    // fresh palette instance, or snap a repositioned device back to where it
+    // was picked up from.
     void CancelDrag()
     {
-        if (draggingObject == null) return;
+        // Keyed on isDragging, not draggingObject: if the object in hand was
+        // destroyed mid-drag, bailing out on a null draggingObject used to
+        // leave isDragging stuck on for good — every placed-device click and
+        // TableManager's own (which waits on IsDragging) stayed locked out.
+        if (!isDragging && draggingObject == null) return;
 
         RestoreFromHologram();
         selectionIndicator?.Hide();
-        devicePlacementActive = false;
-        dragReleaseArmed = false;
 
-        if (isNewDevice)
+        if (draggingObject != null && isNewDevice)
         {
             Object.Destroy(draggingObject);
         }
-        else
+        else if (draggingObject != null)
         {
             draggingObject.transform.SetPositionAndRotation(dragStartPosition, dragStartRotation);
             var rb = draggingObject.GetComponent<Rigidbody>();

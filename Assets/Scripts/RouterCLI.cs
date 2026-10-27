@@ -16,33 +16,22 @@ public class RouterCLI
 
     static readonly (string name, string desc)[] UserExecCommands =
     {
-        ("enable", "Enter privileged EXEC (required to configure)"),
-        ("exit",   "Close CLI"),
-        ("?",      "Show available commands"),
+        ("enable", "Unlock Privileged mode (needed to configure)"),
+        ("exit",   "Close the command line"),
+        ("?",      "List the commands you can use here"),
     };
 
     static readonly (string name, string desc)[] PrivilegedExecCommands =
     {
-        ("configure terminal",      "Enter global config (device-wide settings)"),
-        ("disable",                 "Return to user EXEC mode"),
-        ("show running-config",     "Show current configuration"),
-        ("show version",            "Show system information"),
-        ("show ip interface brief", "List interface IP/status summary"),
-        ("exit",                    "Close CLI"),
-        ("?",                       "Show available commands"),
+        ("configure terminal",      "Enter Global Config to change settings"),
+        ("show ip interface brief", "Show every port's IP address and status"),
+        ("exit",                    "Close the command line"),
+        ("?",                       "List the commands you can use here"),
     };
 
-    static readonly (string name, string desc)[] InterfaceConfigCommands =
-    {
-        ("ip address <ip> <mask>", "Assign an IP address to this interface"),
-        ("shutdown",               "Administratively disable this interface"),
-        ("no shutdown",            "Administratively enable this interface"),
-        ("exit",                   "Return to global configuration"),
-        ("?",                      "Show available commands"),
-    };
-
-    // Depends on device.PortCount, so built per-instance rather than static.
+    // Both depend on device.PortCount, so built per-instance rather than static.
     readonly (string name, string desc)[] _globalConfigCommands;
+    readonly (string name, string desc)[] _interfaceConfigCommands;
 
     readonly NetworkDevice          _device;
     // The interface table itself lives on the GameObject (see
@@ -52,7 +41,7 @@ public class RouterCLI
     // other way (or an older saved scene) might not have one yet, hence the
     // fallback AddComponent below.
     readonly RouterInterfaceConfig  _ifaceConfig;
-    string _hostname;
+    readonly string _hostname;
     Mode   _mode;
     int    _currentPort;
 
@@ -68,11 +57,29 @@ public class RouterCLI
 
         _globalConfigCommands = new (string name, string desc)[]
         {
-            ("interface eth<N>", $"Configure interface eth0..eth{device.PortCount - 1}"),
-            ("hostname <name>",  "Set router hostname"),
-            ("end",              "Return to privileged EXEC"),
-            ("exit",             "Return to privileged EXEC"),
-            ("?",                "Show available commands"),
+            ("interface eth<N>", $"Pick a port to set up (eth0..eth{device.PortCount - 1})"),
+            ("end",              "Leave configuration, back to Privileged"),
+            ("exit",             "Back one level, to Privileged"),
+            ("?",                "List the commands you can use here"),
+        };
+
+        // Includes "interface eth<N>" — real IOS lets you jump straight from
+        // one interface's config mode into another's without exiting back to
+        // global config first (e.g. straight from eth0's "no shutdown" into
+        // "interface eth1"), which is exactly the move Level4Guide's own
+        // stage 3 teaches — see ExecInterfaceCfg's "interface" case below.
+        _interfaceConfigCommands = new (string name, string desc)[]
+        {
+            ("ip address <ip> <mask>", "Give this port an IP address and mask"),
+            ("shutdown",               "Turn this port off"),
+            ("no shutdown",            "Turn this port on"),
+            ("interface eth<N>",       $"Switch to another port (eth0..eth{device.PortCount - 1})"),
+            // ExecInterfaceCfg already accepts "end" (straight back to
+            // Privileged EXEC) — listed here too so it can be dragged, which
+            // Level3Guide's "type end" stage points its drag trail at.
+            ("end",                    "Leave configuration, back to Privileged"),
+            ("exit",                   "Back one level, to Global Config"),
+            ("?",                      "List the commands you can use here"),
         };
     }
 
@@ -86,20 +93,35 @@ public class RouterCLI
     /// <summary>Port index being edited while in InterfaceConfig mode.</summary>
     public int CurrentInterfacePort => _currentPort;
 
-    public string Prompt
+    public string Prompt => PromptFor(_hostname, _mode);
+
+    /// <summary>The prompt a router shows in a given mode — also what the
+    /// explanation cards use to show where a command takes you.</summary>
+    public static string PromptFor(string hostname, Mode mode)
     {
-        get
+        switch (mode)
         {
-            switch (_mode)
-            {
-                case Mode.UserExec:       return $"{_hostname}>";
-                case Mode.PrivilegedExec: return $"{_hostname}#";
-                case Mode.GlobalConfig:   return $"{_hostname}(config)#";
-                case Mode.InterfaceConfig: return $"{_hostname}(config-if)#";
-                default:                  return $"{_hostname}>";
-            }
+            case Mode.UserExec:        return $"{hostname}>";
+            case Mode.PrivilegedExec:  return $"{hostname}#";
+            case Mode.GlobalConfig:    return $"{hostname}(config)#";
+            case Mode.InterfaceConfig: return $"{hostname}(config-if)#";
+            default:                   return $"{hostname}>";
         }
     }
+
+    /// <summary>The modes in order, outermost first — the CLI panel's mode
+    /// ladder strip draws one rung per entry.</summary>
+    public static readonly Mode[] ModeLadder =
+        { Mode.UserExec, Mode.PrivilegedExec, Mode.GlobalConfig, Mode.InterfaceConfig };
+
+    /// <summary>Plain-language explanation of one of CurrentCommands (by its
+    /// exact table name) as it applies from the current mode, or null if it
+    /// has none — see RouterCommandDocs.</summary>
+    public CLICommandDoc Describe(string commandName) =>
+        RouterCommandDocs.For(commandName, _mode, _device.PortCount, _hostname);
+
+    /// <summary>What a mode is for and how to get in and out of it.</summary>
+    public CLIModeDoc DescribeMode(Mode mode) => RouterCommandDocs.ForMode(mode, _hostname);
 
     /// <summary>The command table for whichever mode the CLI is currently in.</summary>
     public (string name, string desc)[] CurrentCommands
@@ -111,7 +133,7 @@ public class RouterCLI
                 case Mode.UserExec:        return UserExecCommands;
                 case Mode.PrivilegedExec:  return PrivilegedExecCommands;
                 case Mode.GlobalConfig:    return _globalConfigCommands;
-                case Mode.InterfaceConfig: return InterfaceConfigCommands;
+                case Mode.InterfaceConfig: return _interfaceConfigCommands;
                 default:                   return UserExecCommands;
             }
         }
@@ -133,6 +155,11 @@ public class RouterCLI
         return matches;
     }
 
+    /// <summary>True when the last Execute() call assigned an interface an IP
+    /// address — lets the interactive panel react (CLIPanelManager's sound)
+    /// without scripted setup (Level7SceneSetup) doing the same.</summary>
+    public bool LastCommandAssignedAddress { get; private set; }
+
     /// <summary>
     /// Process one line of input.
     /// Returns null for silent success, "__CLOSE__" to close the panel,
@@ -140,6 +167,7 @@ public class RouterCLI
     /// </summary>
     public string Execute(string raw)
     {
+        LastCommandAssignedAddress = false;
         string input = raw.Trim();
         if (input.Length == 0) return null;
 
@@ -191,9 +219,6 @@ public class RouterCLI
     {
         switch (cmd)
         {
-            case "disable":
-                _mode = Mode.UserExec;
-                return null;
             case "exit":
                 return "__CLOSE__";
             case "configure":
@@ -220,36 +245,16 @@ public class RouterCLI
 
         switch (sub)
         {
-            case "version":
-                return ShowVersion();
-            case "running-config":
-            case "run":
-                return ShowRunConfig();
             case "ip":
                 if (p.Length >= 4 && p[2].ToLower() == "interface" && p[3].ToLower() == "brief")
                     return ShowIpInterfaceBrief();
                 return "% Usage: show ip interface brief";
             case "?":
                 return "show sub-commands:\n" +
-                       "  running-config       Show current configuration\n" +
-                       "  version              Show system information\n" +
-                       "  ip interface brief   List interface IP/status summary";
+                       "  ip interface brief   Show every port's IP address and status";
             default:
                 return $"% Unknown show sub-command '{p[1]}'.";
         }
-    }
-
-    string ShowVersion() =>
-        $"Cisco IOS Software, Educational Version 15.2\n" +
-        $"Hostname: {_hostname}";
-
-    string ShowRunConfig()
-    {
-        var sb = new StringBuilder();
-        sb.AppendLine("!\nversion 15.2\n!");
-        sb.AppendLine($"hostname {_hostname}\n!");
-        sb.Append("end");
-        return sb.ToString();
     }
 
     string ShowIpInterfaceBrief()
@@ -276,13 +281,6 @@ public class RouterCLI
             case "exit":
                 _mode = Mode.PrivilegedExec;
                 return null;
-            case "hostname":
-                if (p.Length >= 2)
-                {
-                    _hostname = p[1];
-                    return null;
-                }
-                return "% Usage: hostname <name>";
             case "interface":
                 if (p.Length < 2) return $"% Usage: interface eth<0-{_device.PortCount - 1}>";
                 return EnterInterface(p[1]);
@@ -321,9 +319,24 @@ public class RouterCLI
                     if (p.Length < 4) return "% Usage: ip address <ip> <mask>";
                     if (!SubnetMath.IsDottedQuad(p[2]) || !SubnetMath.IsDottedQuad(p[3]))
                         return "% Invalid IP address or mask format.";
+                    int maskPrefix = SubnetMath.MaskToPrefixLength(p[3]);
+                    if (maskPrefix < 0)
+                        return "% Invalid subnet mask.";
+                    if (maskPrefix > SubnetMath.MaxUsablePrefix)
+                        return $"% Mask too small: /{maskPrefix} leaves no address a device can actually hold — use /{SubnetMath.MaxUsablePrefix} ({SubnetMath.PrefixLengthToMask(SubnetMath.MaxUsablePrefix)}) or a shorter mask.";
+                    if (maskPrefix < SubnetMath.MinUsablePrefix)
+                        return $"% Bad mask: {p[3]} puts every address in one subnet — use at least /{SubnetMath.MinUsablePrefix} ({SubnetMath.PrefixLengthToMask(SubnetMath.MinUsablePrefix)}).";
+                    if (!SubnetMath.IsHostAddress(p[2], p[3]))
+                        return "% Invalid host address: that's this subnet's network or broadcast address.";
+                    string conflict = AddressConflict.Find(p[2], _device, _currentPort);
+                    if (conflict != null)
+                        return $"% Address already in use by {conflict}.";
+                    if (!SubnetMath.SameSubnet(iface.ip, iface.mask, p[2], p[3]))
+                        iface.addressedAtTicks = System.DateTime.UtcNow.Ticks;
                     iface.ip   = p[2];
                     iface.mask = p[3];
                     PushInterfaceState();
+                    LastCommandAssignedAddress = true;
                     return null;
                 }
                 return "% Usage: ip address <ip> <mask>";
@@ -345,9 +358,16 @@ public class RouterCLI
             case "exit":
                 _mode = Mode.GlobalConfig;
                 return null;
+            case "interface":
+                // Jump straight to another interface without exiting back to
+                // global config first — matches real IOS, and is exactly the
+                // move Level4Guide's stage 3 teaches (straight from eth0's
+                // "no shutdown" into "interface eth1").
+                if (p.Length < 2) return $"% Usage: interface eth<0-{_device.PortCount - 1}>";
+                return EnterInterface(p[1]);
             case "?":
             case "help":
-                return FormatHelp("Interface configuration commands:", InterfaceConfigCommands);
+                return FormatHelp("Interface configuration commands:", _interfaceConfigCommands);
             default:
                 return NotRecognized(p[0]);
         }
@@ -361,6 +381,7 @@ public class RouterCLI
         RouterInterfaceConfig.PortConfig iface = _ifaceConfig.Get(_currentPort);
         bool isUp = !string.IsNullOrEmpty(iface.ip) && !iface.shutdown;
         _device.SetPortActive(_currentPort, isUp);
+        SubnetVisualizer.RefreshAll();
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

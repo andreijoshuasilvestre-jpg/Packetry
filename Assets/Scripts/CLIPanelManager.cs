@@ -27,12 +27,97 @@ public class CLIPanelManager : MonoBehaviour
     /// actually gets persisted once the player is done editing it.</summary>
     public event System.Action<NetworkDevice> OnPanelClosed;
 
+    /// <summary>Fired at the end of Open(). Open() clears any guide highlight
+    /// left over from a previous session, so a guide step that set one BEFORE
+    /// the player opened the panel (e.g. Level4Guide's "open the Router's CLI,
+    /// then type ...") re-applies it here.</summary>
+    public event System.Action<NetworkDevice> OnPanelOpened;
+
+    // ── Guide hooks (see DragPathGuide) ─────────────────────────────────────────
+
+    /// <summary>The Command Builder chip the current guide highlight points at, or
+    /// null when the panel is closed, there's no highlight, or the highlighted
+    /// command has no chip in the current mode (the outline then falls back to the
+    /// input field — nothing to drag).</summary>
+    public RectTransform HighlightedCommandChipRect =>
+        IsOpen && _hasCommandHighlight && _highlightedCommandName != null &&
+        _paletteChipsByName.TryGetValue(_highlightedCommandName, out GameObject chip) && chip != null
+            ? chip.GetComponent<RectTransform>()
+            : null;
+
+    /// <summary>The Command Queue drop zone chips are dragged into, or null while closed.</summary>
+    public RectTransform CommandQueueRect =>
+        IsOpen && _trayDropZoneGo != null ? _trayDropZoneGo.GetComponent<RectTransform>() : null;
+
+    /// <summary>True while the player is mid-drag with a palette chip.</summary>
+    public bool IsDraggingCommand => _dragGhost != null;
+
+    /// <summary>The Run button under the Command Queue, or null while closed.</summary>
+    public RectTransform RunButtonRect => IsOpen ? _runButtonRt : null;
+
+    /// <summary>True once the highlighted command has a row in the Command Queue —
+    /// dragged (or clicked) in, waiting for its parameters and Run.</summary>
+    public bool IsHighlightedCommandQueued => QueuedHighlightedCommand() != null;
+
+    /// <summary>"Drag the highlighted command into the queue", then — once it's
+    /// there — "click Run" (see DragGuideRoute.Done/Then), filling in any of its
+    /// parameter boxes first. Resolves itself live, so it only shows while there
+    /// actually is a highlighted chip.</summary>
+    public DragGuideRoute HighlightedCommandDragRoute => new DragGuideRoute(
+        GuideAnchor.Ui(() => HighlightedCommandChipRect),
+        GuideAnchor.Ui(() => CommandQueueRect),
+        inProgress: () => IsDraggingCommand,
+        done: () => IsHighlightedCommandQueued,
+        then: GuideAnchor.Ui(() => QueuedCommandNextClickRect));
+
+    QueuedCommand QueuedHighlightedCommand()
+    {
+        if (!IsOpen || !_hasCommandHighlight || _highlightedCommandName == null) return null;
+        foreach (var qc in _queue)
+            if (qc.Name == _highlightedCommandName) return qc;
+        return null;
+    }
+
+    // What to click once the highlighted command is queued: the first of its
+    // parameter boxes that isn't finished yet (running it blank or half-typed
+    // only earns an error), then Run. "Finished" means a complete value, not
+    // just a started one (see CLICommandTemplate.IsParamComplete) — so the
+    // marker stays on the <ip> box while "192.168." is still being typed,
+    // instead of jumping to <mask> at the first keystroke.
+    RectTransform QueuedCommandNextClickRect
+    {
+        get
+        {
+            var qc = QueuedHighlightedCommand();
+            if (qc == null) return null;
+            foreach (var seg in qc.Segments)
+                if (seg.IsParam && qc.ParamFields.TryGetValue(seg.Text, out var field) && field != null &&
+                    !CLICommandTemplate.IsParamComplete(seg.Text, field.text))
+                    return field.GetComponent<RectTransform>();
+            return RunButtonRect;
+        }
+    }
+
     private GameObject    _panelRoot;
+    // Sits between CLI_Canvas and _panelRoot, carrying a RectMask2D — its own
+    // rect is what Open()/Close() animate open/shut (see PanelRevealFX),
+    // while _panelRoot itself (and everything inside it) stays a fixed
+    // size/position always, so the reveal clips the combo into view rather
+    // than squashing its content. All canvas-space positioning
+    // (UpdateFloatingPanel, Open's centered placement) targets THIS now, not
+    // _panelRoot — see those methods.
+    private GameObject    _panelWrapper;
     private TextMeshProUGUI _titleLabel;
     private TextMeshProUGUI _outputText;
     private TextMeshProUGUI _promptLabel;
     private TMP_InputField  _inputField;
     private ScrollRect      _outputScrollRect;
+    // Live soft-guardrail hint shown while typing a router interface's subnet
+    // mask (see OnCliInputValueChanged) — an overlay bar above the input row,
+    // hidden until there's something to say so it never disturbs the panel's
+    // hand-tuned resting layout.
+    private GameObject      _maskHintBar;
+    private TextMeshProUGUI _maskHintLabel;
     private NetworkDevice   _currentDevice;
 
     private Canvas _screenCanvas;
@@ -61,6 +146,7 @@ public class CLIPanelManager : MonoBehaviour
     private readonly Dictionary<string, GameObject> _paletteChipsByName
         = new Dictionary<string, GameObject>();
     private readonly List<QueuedCommand> _queue = new List<QueuedCommand>();
+    private RectTransform _runButtonRt;
 
     // ── Guide/tutorial outline highlights (see PulsingOutline) ──────────────────
     // Two independent pulsing outlines: one points at whichever command the
@@ -74,6 +160,20 @@ public class CLIPanelManager : MonoBehaviour
     private PulsingOutline _promptOutline;
     private bool   _hasCommandHighlight;
     private string _highlightedCommandName; // null = highlight the input field itself
+
+    private readonly List<ScreenOccupancy.Entry> _reservations = new List<ScreenOccupancy.Entry>(); // PlaceWrapper scratch
+
+    // ── Mode ladder (see BuildModeLadder) ───────────────────────────────────────
+    // A strip under the header showing every mode in order (User > Privileged >
+    // Config > Interface) with the current one lit — the prompt alone ("#" vs
+    // "(config)#") never told a new player where they were or where they could
+    // go next. Hovering a rung explains that mode.
+    const float HeaderHeight = 42f;
+    const float LadderHeight = 28f;
+    private GameObject    _modeLadderGo;
+    private RectTransform _outputBgRt;
+    private readonly List<(RouterCLI.Mode mode, Image plate, TextMeshProUGUI label)> _ladderRungs =
+        new List<(RouterCLI.Mode, Image, TextMeshProUGUI)>();
 
     [Header("Panel")]
     // Narrower, comic-panel-style callout rather than a full dashboard — the
@@ -128,6 +228,7 @@ public class CLIPanelManager : MonoBehaviour
     [SerializeField] private Color clearBorder     = new Color(0.55f, 0.15f, 0.13f, 1f);
     [SerializeField] private Color paramFieldFill   = new Color(0.03f, 0.04f, 0.03f, 1f);
     [SerializeField] private Color paramFieldBorder = new Color(0.20f, 0.40f, 0.25f, 1f); // dim green
+    [SerializeField] private Color paramFieldFocusBorder = new Color(0.35f, 0.86f, 0.47f, 1f); // terminal green, while typing into it
 
     [Header("Header")]
     [SerializeField] private float   titleFontSize  = 15f;
@@ -177,8 +278,11 @@ public class CLIPanelManager : MonoBehaviour
 
         if (_currentDevice != null && _currentDevice.deviceType == DeviceType.Router)
             UpdateFloatingPanel();
+        else
+            PlaceWrapper(Vector2.zero); // centered, but still steps aside from a Reservation (see PlaceWrapper)
 
         if (Keyboard.current == null) return;
+        if (InteractionMode.IsSuspended) return; // Esc mustn't close the panel from behind an overlay
 
         if (Keyboard.current.escapeKey.wasPressedThisFrame)
         {
@@ -206,6 +310,17 @@ public class CLIPanelManager : MonoBehaviour
 
         var canvasRt = (RectTransform)_screenCanvas.transform;
         RectTransformUtility.ScreenPointToLocalPointInRectangle(canvasRt, screenPoint, null, out Vector2 local);
+        PlaceWrapper(local);
+    }
+
+    // Puts the CLI+sidebar combo's center at `local` (canvas-center-relative),
+    // clamped on-screen and then slid sideways out of any ScreenOccupancy
+    // Reservation — e.g. the tutorial callout's home spot, so a guide step's
+    // instructions and the terminal they're about sit side by side instead of
+    // one on top of the other whenever the screen is wide enough for both.
+    void PlaceWrapper(Vector2 local)
+    {
+        var canvasRt = (RectTransform)_screenCanvas.transform;
 
         // Clamp against the *combined* CLI+sidebar footprint (not just the CLI
         // panel) so the sidebar can never clip off-screen, then re-derive the
@@ -213,21 +328,36 @@ public class CLIPanelManager : MonoBehaviour
         // ComboCenterOffsetX/SidebarBulge for why the panel and the combo don't
         // share the same center.
         Vector2 halfCanvas    = canvasRt.rect.size * 0.5f;
-        float comboHalfWidth  = (panelSize.x + SidebarBulge) * 0.5f;
-        float maxComboX       = Mathf.Max(0f, halfCanvas.x - comboHalfWidth - screenClampMargin);
+        var comboSize         = new Vector2(panelSize.x + SidebarBulge, panelSize.y);
+        float maxComboX       = Mathf.Max(0f, halfCanvas.x - comboSize.x * 0.5f - screenClampMargin);
         float maxY            = Mathf.Max(0f, halfCanvas.y - panelSize.y * 0.5f - screenClampMargin);
 
-        float comboCenterX = Mathf.Clamp(local.x, -maxComboX, maxComboX);
-        local.x = comboCenterX + ComboCenterOffsetX;
+        // No + ComboCenterOffsetX here — that offset is now _panelRoot's own
+        // fixed position within _panelWrapper (see BuildPanel), since this
+        // targets the wrapper (the combo's overall center), not the panel itself.
+        local.x = Mathf.Clamp(local.x, -maxComboX, maxComboX);
         local.y = Mathf.Clamp(local.y, -maxY, maxY);
 
-        _panelRoot.GetComponent<RectTransform>().anchoredPosition = local;
+        _reservations.Clear();
+        ScreenOccupancy.Collect(_reservations, OccupantLayer.Reservation);
+        if (_reservations.Count > 0)
+        {
+            float scale = canvasRt.lossyScale.x > 0f ? canvasRt.lossyScale.x : 1f;
+            Vector2 canvasCenter = canvasRt.position; // overlay canvas: its world position IS the screen center, in pixels
+            var comboScreen = new Rect(canvasCenter + (local - comboSize * 0.5f) * scale, comboSize * scale);
+            float shift = ScreenOccupancy.BestHorizontalShift(comboScreen, _reservations,
+                (-maxComboX - local.x) * scale, (maxComboX - local.x) * scale, screenClampMargin * scale);
+            local.x += shift / scale;
+        }
+
+        _panelWrapper.GetComponent<RectTransform>().anchoredPosition = local;
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
 
     public void Open(NetworkDevice device)
     {
+        bool wasOpen = IsOpen; // only play the opening reveal on a genuine open, not re-Open() on an already-visible panel (e.g. clicking a different router while it's up)
         ClearHighlights(); // a stale guide highlight from a previous session shouldn't linger
         _currentDevice = device;
         _titleLabel.text = $"CLI  —  {device.deviceName}  [{device.deviceType}]";
@@ -270,7 +400,7 @@ public class CLIPanelManager : MonoBehaviour
             // case below) — UpdateFloatingPanel() tracks _panelBasePos's projected
             // screen position every frame, so reposition once now too or it'd flash
             // at whatever anchoredPosition was last left at for one frame.
-            _panelRoot.transform.SetParent(_screenCanvas.transform, false);
+            _panelWrapper.transform.SetParent(_screenCanvas.transform, false);
 
             if (IsometricCamera.Instance != null)
             {
@@ -289,27 +419,41 @@ public class CLIPanelManager : MonoBehaviour
             banner = $"Connected to {device.deviceName}.";
 
             // Original centered screen-space overlay behavior — no camera change.
-            // Offset by ComboCenterOffsetX so the panel+sidebar combo is what's
-            // actually centered on screen (see BuildPanel).
-            _panelRoot.transform.SetParent(_screenCanvas.transform, false);
-            _panelRoot.GetComponent<RectTransform>().anchoredPosition = new Vector2(ComboCenterOffsetX, 0f);
+            // ComboCenterOffsetX no longer applies here — it's baked into
+            // _panelRoot's own fixed position within _panelWrapper (see
+            // BuildPanel), so the wrapper itself just centers at (0,0).
+            _panelWrapper.transform.SetParent(_screenCanvas.transform, false);
+            PlaceWrapper(Vector2.zero);
         }
 
         _outputText.text = banner;
         _panelRoot.SetActive(true);
         _inputField.text = string.Empty;
         _inputField.ActivateInputField();
+        _maskHintBar.SetActive(false);
         ClearQueue();
         RefreshModulePalette();
         UpdateCableHighlight();
+
+        if (!wasOpen)
+        {
+            // See PanelRevealFX — same VHS/CRT power-on grow, now with the
+            // glow flash + spark burst DeviceAddressPopup/InterfacePickerPopup
+            // already get, instead of this panel's own glow-less copy of it.
+            PanelRevealFX.Play(_panelWrapper, panelSize.y, textColor,
+                _screenCanvas.transform as RectTransform, _screenCanvas.worldCamera);
+        }
+
+        OnPanelOpened?.Invoke(device);
     }
 
     public void Close()
     {
+        if (_panelRoot == null || !_panelRoot.activeSelf) return; // already closed / mid-close
         NetworkDevice closedDevice = _currentDevice;
 
-        _panelRoot.SetActive(false);
         _currentDevice = null;
+        _maskHintBar.SetActive(false);
         ClearQueue();
         ClearHighlights();
 
@@ -330,6 +474,12 @@ public class CLIPanelManager : MonoBehaviour
             IsometricCamera.Instance.FocusOn(_savedLookTarget, _savedDistance, _savedPitch, _savedYaw);
             _cameraFocused = false;
         }
+
+        // Mirrors the open reveal (shrink instead of grow) before actually
+        // hiding the panel, instead of just popping it off instantly.
+        PanelRevealFX.PlayClose(_panelWrapper, panelSize.y, textColor,
+            _screenCanvas.transform as RectTransform, _screenCanvas.worldCamera,
+            () => { if (_panelRoot != null) _panelRoot.SetActive(false); });
 
         if (closedDevice != null) OnPanelClosed?.Invoke(closedDevice);
     }
@@ -358,6 +508,7 @@ public class CLIPanelManager : MonoBehaviour
             // Other device types: echo only (expand later)
             AppendOutput($"> {trimmed}");
             AppendOutput("% CLI not implemented for this device type.");
+            AudioManager.Instance?.PlaySfx(SfxId.Refusal);
         }
     }
 
@@ -382,6 +533,10 @@ public class CLIPanelManager : MonoBehaviour
         if (result != null)
             AppendOutput(result);
 
+        // Every RouterCLI error starts with "%", same as real IOS.
+        if (result != null && result.StartsWith("%")) AudioManager.Instance?.PlaySfx(SfxId.Refusal);
+        else if (cli.LastCommandAssignedAddress)      AudioManager.Instance?.PlaySfx(SfxId.IpAssigned);
+
         SetPrompt(cli.Prompt);
         return true;
     }
@@ -390,6 +545,7 @@ public class CLIPanelManager : MonoBehaviour
     {
         var qc = new QueuedCommand
         {
+            Name     = name,
             Segments = CLICommandTemplate.Parse(name)
         };
         qc.RowGo = BuildQueueRow(qc);
@@ -501,12 +657,16 @@ public class CLIPanelManager : MonoBehaviour
 
         RouterCLI cli = GetOrCreateSession(_currentDevice);
         foreach (var (name, desc) in cli.CurrentCommands)
-            BuildPaletteChip(name, desc);
+            BuildPaletteChip(name, desc, cli.Describe(name));
 
         ApplyCommandHighlight();
     }
 
-    void BuildPaletteChip(string name, string desc)
+    // Width of the kind tag pinned to a chip's top-right corner — the name
+    // stops short of it.
+    const float ChipTagWidth = 54f;
+
+    void BuildPaletteChip(string name, string desc, CLICommandDoc doc)
     {
         var chipGo = MakeRect("ModuleChip", _paletteListParent);
         var img = chipGo.AddComponent<Image>();
@@ -518,9 +678,50 @@ public class CLIPanelManager : MonoBehaviour
         le.minHeight = 42;
         le.preferredHeight = 42;
 
+        // What kind of command this is (move / change / view / help), in its
+        // own color twice over: a stripe down the chip's left edge to scan a
+        // list by, and a labeled tag to read. Hovering explains both.
+        float textLeft = 8f, nameRight = -8f;
+        if (doc != null)
+        {
+            Color kindColor = CliCommandKinds.Color(doc.Kind);
+
+            var stripeGo = MakeRect("KindStripe", chipGo.transform);
+            var stripe = stripeGo.AddComponent<Image>();
+            stripe.color = kindColor;
+            stripe.raycastTarget = false;
+            var srt = stripeGo.GetComponent<RectTransform>();
+            srt.anchorMin = new Vector2(0, 0);
+            srt.anchorMax = new Vector2(0, 1);
+            srt.pivot     = new Vector2(0, 0.5f);
+            srt.offsetMin = new Vector2(3, 4);
+            srt.offsetMax = new Vector2(7, -4);
+
+            var tagGo = MakeRect("KindTag", chipGo.transform);
+            var tagImg = tagGo.AddComponent<Image>();
+            tagImg.sprite = SmallPlate(Color.Lerp(kindColor, Color.black, 0.55f), Color.Lerp(kindColor, Color.black, 0.2f));
+            tagImg.type = Image.Type.Sliced;
+            tagImg.raycastTarget = false;
+            var trt = tagGo.GetComponent<RectTransform>();
+            trt.anchorMin = trt.anchorMax = new Vector2(1, 1);
+            trt.pivot     = new Vector2(1, 1);
+            trt.anchoredPosition = new Vector2(-5, -4);
+            trt.sizeDelta = new Vector2(ChipTagWidth, 15);
+            var tagLabel = MakeTMP("Label", tagGo.transform);
+            tagLabel.text      = CliCommandKinds.Label(doc.Kind);
+            tagLabel.fontSize  = 9f;
+            tagLabel.color     = Color.Lerp(kindColor, Color.white, 0.45f);
+            tagLabel.alignment = TextAlignmentOptions.Center;
+            tagLabel.raycastTarget = false;
+            StretchToFill(tagLabel.GetComponent<RectTransform>());
+
+            textLeft  = 13f;
+            nameRight = -(ChipTagWidth + 10f);
+        }
+
         // Dark text — chip fill is the light silver plate, same as the panel.
         var nameTmp      = MakeTMP("Name", chipGo.transform);
-        nameTmp.text      = name;
+        nameTmp.text      = Literal(name);
         nameTmp.fontSize  = 12f;
         nameTmp.color     = titleTextColor;
         nameTmp.fontStyle = FontStyles.Bold;
@@ -530,30 +731,50 @@ public class CLIPanelManager : MonoBehaviour
         var nrt = nameTmp.GetComponent<RectTransform>();
         nrt.anchorMin = new Vector2(0, 0.5f);
         nrt.anchorMax = new Vector2(1, 1);
-        nrt.offsetMin = new Vector2(8, 0);
-        nrt.offsetMax = new Vector2(-8, -3);
+        nrt.offsetMin = new Vector2(textLeft, 0);
+        nrt.offsetMax = new Vector2(nameRight, -3);
 
+        // Was 9.5pt at 65% opacity — too faint to read on the silver plate.
         var descTmp      = MakeTMP("Desc", chipGo.transform);
         descTmp.text      = desc;
-        descTmp.fontSize  = 9.5f;
-        descTmp.color     = new Color(titleTextColor.r, titleTextColor.g, titleTextColor.b, 0.65f);
+        descTmp.fontSize  = 10f;
+        descTmp.color     = new Color(titleTextColor.r, titleTextColor.g, titleTextColor.b, 0.85f);
         descTmp.alignment = TextAlignmentOptions.TopLeft;
         descTmp.enableWordWrapping = false;
         descTmp.overflowMode = TextOverflowModes.Ellipsis;
         var drt = descTmp.GetComponent<RectTransform>();
         drt.anchorMin = new Vector2(0, 0);
         drt.anchorMax = new Vector2(1, 0.5f);
-        drt.offsetMin = new Vector2(8, 2);
+        drt.offsetMin = new Vector2(textLeft, 2);
         drt.offsetMax = new Vector2(-8, 0);
 
         _paletteChipSource[chipGo] = (name, desc);
         _paletteChipsByName[name]  = chipGo;
 
+        // Hover for the full explanation, opening over the terminal (left) so
+        // it never covers the rest of the palette or the queue.
+        HoverTooltip.Attach(chipGo, () => CommandTooltip(name, desc), TooltipSide.Left, delay: 0.35f);
+
         AddTrigger(chipGo, EventTriggerType.PointerEnter, _ => img.sprite = chipHover);
         AddTrigger(chipGo, EventTriggerType.PointerExit,  _ => img.sprite = chipNormal);
+        // A plain click queues the command too — dragging was the only way in,
+        // and nothing on screen said so. A drag released back over the chip
+        // still reports a click; it's already been handled as a drag.
+        AddTrigger(chipGo, EventTriggerType.PointerClick, data =>
+        {
+            var pe = (PointerEventData)data;
+            if (pe.button != PointerEventData.InputButton.Left || pe.dragging) return;
+            AddQueuedCommand(name);
+            AudioManager.Instance?.PlaySfx(SfxId.UIClick);
+        });
         AddTrigger(chipGo, EventTriggerType.BeginDrag, data => BeginDragModule((PointerEventData)data, name));
         AddTrigger(chipGo, EventTriggerType.Drag,      data => DragModule((PointerEventData)data));
         AddTrigger(chipGo, EventTriggerType.EndDrag,   data => EndDragModule((PointerEventData)data));
+        // EventTrigger implements IScrollHandler itself, so without this the chip
+        // swallows the mouse wheel and the palette only scrolled from the gaps
+        // between chips — hand the event on up to the palette's ScrollRect.
+        AddTrigger(chipGo, EventTriggerType.Scroll, data =>
+            ExecuteEvents.ExecuteHierarchy(chipGo.transform.parent.gameObject, data, ExecuteEvents.scrollHandler));
     }
 
     GameObject BuildQueueRow(QueuedCommand qc)
@@ -611,25 +832,56 @@ public class CLIPanelManager : MonoBehaviour
             else
             {
                 bool isInterfaceIndex = seg.Text == "N";
+                bool isAddress        = seg.Text == "ip" || seg.Text == "mask";
                 var fieldGo = MakeRect("Param", rowGo.transform);
+                // Built inactive and only switched on once fully wired (end of
+                // this block): TMP_InputField creates its blinking caret in
+                // OnEnable, and only if textComponent is already assigned by
+                // then — AddComponent on an active object runs OnEnable straight
+                // away, before the wiring, so these fields took typing with no
+                // caret at all. (The main input field escapes this because the
+                // whole panel starts hidden and is re-enabled on Open.)
+                fieldGo.SetActive(false);
                 var fieldImg = fieldGo.AddComponent<Image>();
                 fieldImg.sprite = SmallPlate(paramFieldFill, paramFieldBorder);
                 fieldImg.type   = Image.Type.Sliced;
                 var field = fieldGo.AddComponent<TMP_InputField>();
+                // Border lights up while this field has focus, so it's obvious
+                // which parameter the keystrokes are going into.
+                Sprite focusedPlate = SmallPlate(paramFieldFill, paramFieldFocusBorder);
+                field.transition  = Selectable.Transition.SpriteSwap;
+                field.spriteState = new SpriteState { pressedSprite = focusedPlate, selectedSprite = focusedPlate };
                 var fle = fieldGo.AddComponent<LayoutElement>();
                 fle.preferredWidth  = isInterfaceIndex ? 48f : 76f;
                 fle.preferredHeight = 28f;
+                // A full dotted-quad ("192.168.100.100") is wider than 76px at
+                // this font size — let address fields soak up whatever width
+                // the row has left over (the Remove button ends up pinned to
+                // the row's right edge) before falling back to scrolling.
+                if (isAddress) fle.flexibleWidth = 1f;
 
-                var fieldTextGo = MakeRect("Text", fieldGo.transform);
+                // Masked viewport, same as the main CLI input's "Text Area" —
+                // TMP_InputField scrolls a single-line text component sideways
+                // inside its textViewport to keep the caret in view, so with
+                // the field itself as the viewport (no mask) anything longer
+                // than the field just drew straight past its edge and out of
+                // the panel.
+                var textAreaGo = MakeRect("Text Area", fieldGo.transform);
+                textAreaGo.AddComponent<RectMask2D>();
+                var tart = textAreaGo.GetComponent<RectTransform>();
+                StretchToFill(tart);
+                tart.offsetMin = new Vector2(4, 0);
+                tart.offsetMax = new Vector2(-4, 0);
+
+                var fieldTextGo = MakeRect("Text", textAreaGo.transform);
                 var fieldTmp    = fieldTextGo.AddComponent<TextMeshProUGUI>();
                 fieldTmp.font      = _font;
                 fieldTmp.fontSize  = 11f;
                 fieldTmp.color     = textColor;
                 fieldTmp.alignment = TextAlignmentOptions.MidlineLeft;
-                fieldTmp.margin    = new Vector4(4, 0, 4, 0);
                 StretchToFill(fieldTextGo.GetComponent<RectTransform>());
 
-                var placeholderGo = MakeRect("Placeholder", fieldGo.transform);
+                var placeholderGo = MakeRect("Placeholder", textAreaGo.transform);
                 var placeholderTmp = placeholderGo.AddComponent<TextMeshProUGUI>();
                 placeholderTmp.font      = _font;
                 placeholderTmp.text      = isInterfaceIndex ? "0" : $"<{seg.Text}>";
@@ -637,11 +889,10 @@ public class CLIPanelManager : MonoBehaviour
                 placeholderTmp.color     = placeholderColor;
                 placeholderTmp.fontStyle = FontStyles.Italic;
                 placeholderTmp.alignment = TextAlignmentOptions.MidlineLeft;
-                placeholderTmp.margin    = new Vector4(4, 0, 4, 0);
                 StretchToFill(placeholderGo.GetComponent<RectTransform>());
 
                 field.targetGraphic = fieldImg;
-                field.textViewport  = fieldGo.GetComponent<RectTransform>();
+                field.textViewport  = tart;
                 field.textComponent = fieldTmp;
                 field.placeholder   = placeholderTmp;
                 if (isInterfaceIndex)
@@ -656,7 +907,19 @@ public class CLIPanelManager : MonoBehaviour
                     field.characterLimit = 2;
                     field.onValidateInput = (text, charIndex, addedChar) => char.IsDigit(addedChar) ? addedChar : '\0';
                 }
+                else if (isAddress)
+                {
+                    // Same Standard + manual filter approach as above. 15 is the
+                    // longest a dotted-quad can be ("255.255.255.255") — out-of-
+                    // range octets like 999 still get through, on purpose, so
+                    // RouterCLI can reject them with a real error message.
+                    field.contentType    = TMP_InputField.ContentType.Standard;
+                    field.characterLimit = 15;
+                    field.onValidateInput = (text, charIndex, addedChar) =>
+                        char.IsDigit(addedChar) || addedChar == '.' ? addedChar : '\0';
+                }
                 field.navigation = new Navigation { mode = Navigation.Mode.None };
+                fieldGo.SetActive(true);
 
                 qc.ParamFields[seg.Text] = field;
             }
@@ -675,6 +938,10 @@ public class CLIPanelManager : MonoBehaviour
         removeLabel.alignment = TextAlignmentOptions.Center;
         StretchToFill(removeLabel.GetComponent<RectTransform>());
         removeBtn.onClick.AddListener(() => RemoveQueuedCommand(qc));
+
+        // Same explanation as the palette chip it came from — handy for
+        // remembering what <ip>/<mask> want while filling them in.
+        HoverTooltip.Attach(rowGo, () => CommandTooltip(qc.Name, null), TooltipSide.Left);
 
         return rowGo;
     }
@@ -777,10 +1044,12 @@ public class CLIPanelManager : MonoBehaviour
         return cli;
     }
 
+    // Every prompt change is a possible mode change, so the ladder follows it.
     void SetPrompt(string prompt)
     {
         if (_promptLabel != null)
             _promptLabel.text = prompt;
+        RefreshModeLadder();
     }
 
     // ── Guide/tutorial outline highlights ────────────────────────────────────
@@ -873,10 +1142,31 @@ public class CLIPanelManager : MonoBehaviour
         UIScale.Register(scaler);
         canvasGo.AddComponent<GraphicRaycaster>();
 
+        // Reveal wrapper — masks _panelRoot + the command builder sidebar
+        // together (wide enough to cover both, see SidebarBulge) so Open() can
+        // animate this rect's own height open from a thin centered line without
+        // touching (or squashing) anything inside it. RectMask2D clips against
+        // ITS OWN rect regardless of where a descendant's anchors point, which
+        // is exactly why this has to be a separate wrapper rather than living
+        // on _panelRoot directly — the sidebar bulges out past _panelRoot's own
+        // right edge on purpose, and masking _panelRoot itself would permanently
+        // clip that bulge instead of just gating the open animation.
+        _panelWrapper = MakeRect("CLI_PanelWrapper", canvasGo.transform);
+        _panelWrapper.AddComponent<RectMask2D>();
+        var wrapperRt = _panelWrapper.GetComponent<RectTransform>();
+        wrapperRt.anchorMin = new Vector2(0.5f, 0.5f);
+        wrapperRt.anchorMax = new Vector2(0.5f, 0.5f);
+        wrapperRt.pivot     = new Vector2(0.5f, 0.5f);
+        wrapperRt.sizeDelta = new Vector2(panelSize.x + SidebarBulge, panelSize.y);
+
         // Panel root — the silver/grey chamfered outer shell everything else
         // sits on (see BuildHeader: the header itself has no background of its
         // own, so this shows through behind the title/close button).
-        _panelRoot = MakeRect("CLI_Panel", canvasGo.transform);
+        _panelRoot = MakeRect("CLI_Panel", _panelWrapper.transform);
+        // Registered (along with the command builder, see BuildCommandBuilderPanel)
+        // for exactly as long as the panel is open, so the tutorial callout and
+        // guide markers know to step around it.
+        OccupiesScreen.Add(_panelRoot, OccupantLayer.Panel);
         var panelImg = _panelRoot.AddComponent<Image>();
         panelImg.sprite = PlateSpriteBuilder.GetSprite(panelFill, panelBorder, trimColor,
             borderThickness: 2, chamfer: 5, pixelScale: 6);
@@ -888,10 +1178,12 @@ public class CLIPanelManager : MonoBehaviour
         panelRt.sizeDelta        = panelSize;
         // Offset so the CLI panel + the command builder sidebar (which bulges
         // out past the panel's own right edge) sit centered as one combined
-        // block, not just the CLI panel itself (see ComboCenterOffsetX).
+        // block within the wrapper, not just the CLI panel itself (see
+        // ComboCenterOffsetX) — fixed always; the wrapper is what moves/resizes.
         panelRt.anchoredPosition = new Vector2(ComboCenterOffsetX, 0f);
 
         BuildHeader();
+        BuildModeLadder();
         BuildOutputArea();
         BuildInputArea();
         BuildCommandBuilderPanel();
@@ -947,6 +1239,7 @@ public class CLIPanelManager : MonoBehaviour
         var btn = closeBtnGo.AddComponent<Button>();
         btn.targetGraphic = closeImg;
         btn.onClick.AddListener(Close);
+        ButtonClickGlow.Attach(closeBtnGo, btn, closeColor);
         var crt = closeBtnGo.GetComponent<RectTransform>();
         crt.anchorMin        = new Vector2(1, 0.5f);
         crt.anchorMax        = new Vector2(1, 0.5f);
@@ -960,6 +1253,184 @@ public class CLIPanelManager : MonoBehaviour
         xLabel.alignment = TextAlignmentOptions.Center;
         StretchToFill(xLabel.GetComponent<RectTransform>());
     }
+
+    // ── Mode ladder ──────────────────────────────────────────────────────────
+
+    void BuildModeLadder()
+    {
+        _modeLadderGo = MakeRect("ModeLadder", _panelRoot.transform);
+        var rt = _modeLadderGo.GetComponent<RectTransform>();
+        rt.anchorMin        = new Vector2(0, 1);
+        rt.anchorMax        = new Vector2(1, 1);
+        rt.pivot            = new Vector2(0.5f, 1f);
+        rt.anchoredPosition = new Vector2(0, -HeaderHeight);
+        rt.sizeDelta        = new Vector2(0, LadderHeight);
+
+        var row = _modeLadderGo.AddComponent<HorizontalLayoutGroup>();
+        row.padding = new RectOffset(10, 10, 0, 6);
+        row.spacing = 4f;
+        row.childAlignment         = TextAnchor.MiddleLeft;
+        row.childControlWidth      = true;
+        row.childControlHeight     = true;
+        row.childForceExpandWidth  = false;
+        row.childForceExpandHeight = true;
+
+        var caption = MakeTMP("Caption", _modeLadderGo.transform);
+        caption.text      = "MODE";
+        caption.fontSize  = 10f;
+        caption.color     = new Color(titleTextColor.r, titleTextColor.g, titleTextColor.b, 0.7f);
+        caption.alignment = TextAlignmentOptions.MidlineLeft;
+        caption.raycastTarget = false;
+        var cle = caption.gameObject.AddComponent<LayoutElement>();
+        cle.preferredWidth = cle.minWidth = 36f;
+
+        for (int i = 0; i < RouterCLI.ModeLadder.Length; i++)
+        {
+            RouterCLI.Mode mode = RouterCLI.ModeLadder[i];
+
+            if (i > 0)
+            {
+                var arrowGo = MakeRect("Step", _modeLadderGo.transform);
+                var arrow = arrowGo.AddComponent<Image>();
+                arrow.sprite = FlyoutArrowIconBuilder.GetSprite(pointRight: true, lit: false);
+                arrow.preserveAspect = true;
+                arrow.raycastTarget = false;
+                var ale = arrowGo.AddComponent<LayoutElement>();
+                ale.preferredWidth = ale.minWidth = 9f;
+            }
+
+            var rungGo = MakeRect("Rung_" + mode, _modeLadderGo.transform);
+            var plate = rungGo.AddComponent<Image>();
+            plate.type = Image.Type.Sliced;
+            var rle = rungGo.AddComponent<LayoutElement>();
+            rle.flexibleWidth = 1f;
+            rle.minWidth = 60f;
+
+            var label = MakeTMP("Label", rungGo.transform);
+            label.fontSize  = 10f;
+            // Shrinks to fit "INTERFACE eth0" rather than cutting it off.
+            label.enableAutoSizing = true;
+            label.fontSizeMin = 7f;
+            label.fontSizeMax = 10f;
+            label.alignment = TextAlignmentOptions.Center;
+            label.enableWordWrapping = false;
+            label.overflowMode = TextOverflowModes.Ellipsis;
+            label.raycastTarget = false;
+            StretchToFill(label.GetComponent<RectTransform>());
+
+            HoverTooltip.Attach(rungGo, () => ModeTooltip(mode), TooltipSide.Below, delay: 0.3f);
+            _ladderRungs.Add((mode, plate, label));
+        }
+    }
+
+    // Lights the current mode's rung (terminal green, like the prompt it
+    // matches), keeps the ones already passed through readable and dims the
+    // ones still ahead — a map of "where am I, how deep can I go".
+    void RefreshModeLadder()
+    {
+        if (_modeLadderGo == null) return;
+
+        bool isRouter = _currentDevice != null && _currentDevice.deviceType == DeviceType.Router;
+        _modeLadderGo.SetActive(isRouter);
+        if (_outputBgRt != null)
+            _outputBgRt.offsetMax = new Vector2(0, -(HeaderHeight + (isRouter ? LadderHeight : 0f)));
+        if (!isRouter) return;
+
+        RouterCLI cli = GetOrCreateSession(_currentDevice);
+        int current = System.Array.IndexOf(RouterCLI.ModeLadder, cli.CurrentMode);
+
+        for (int i = 0; i < _ladderRungs.Count; i++)
+        {
+            var (mode, plate, label) = _ladderRungs[i];
+            int step = System.Array.IndexOf(RouterCLI.ModeLadder, mode);
+            string text = cli.DescribeMode(mode).Label;
+
+            if (step == current)
+            {
+                plate.sprite    = SmallPlate(blackFill, textColor);
+                label.color     = textColor;
+                label.fontStyle = FontStyles.Bold;
+                if (mode == RouterCLI.Mode.InterfaceConfig) text += " eth" + cli.CurrentInterfacePort;
+            }
+            else if (step < current)
+            {
+                plate.sprite    = SmallPlate(LadderPassedFill, panelBorder);
+                label.color     = titleTextColor;
+                label.fontStyle = FontStyles.Normal;
+            }
+            else
+            {
+                plate.sprite    = SmallPlate(panelFill, LadderAheadBorder);
+                label.color     = new Color(titleTextColor.r, titleTextColor.g, titleTextColor.b, 0.6f);
+                label.fontStyle = FontStyles.Normal;
+            }
+            label.text = text;
+        }
+    }
+
+    static readonly Color LadderPassedFill  = new Color(0.58f, 0.58f, 0.60f, 1f);
+    static readonly Color LadderAheadBorder = new Color(0.52f, 0.52f, 0.55f, 1f);
+
+    // ── Explanation cards (see HoverTooltip) ─────────────────────────────────
+
+    TooltipContent ModeTooltip(RouterCLI.Mode mode)
+    {
+        if (_currentDevice == null || _currentDevice.deviceType != DeviceType.Router) return null;
+        RouterCLI cli = GetOrCreateSession(_currentDevice);
+        CLIModeDoc doc = cli.DescribeMode(mode);
+        bool here = cli.CurrentMode == mode;
+        return new TooltipContent
+        {
+            Title    = doc.Name,
+            Tag      = here ? "YOU ARE HERE" : null,
+            TagColor = textColor,
+            Subtitle = "Prompt:  " + Literal(doc.Prompt),
+            Body     = doc.What,
+            Footer   = Literal(doc.HowToMove),
+        };
+    }
+
+    /// <summary>The explanation card for one of the current mode's commands
+    /// (by its exact command-table name) — falls back to the table's own
+    /// one-line description for a command with no full explanation.</summary>
+    TooltipContent CommandTooltip(string name, string fallbackDesc)
+    {
+        if (_currentDevice == null || _currentDevice.deviceType != DeviceType.Router) return null;
+        CLICommandDoc doc = GetOrCreateSession(_currentDevice).Describe(name);
+        if (doc == null)
+            return string.IsNullOrEmpty(fallbackDesc) ? null : new TooltipContent { Title = Literal(name), Body = fallbackDesc };
+
+        var body = new StringBuilder(doc.What);
+        if (doc.Params != null && doc.Params.Length > 0)
+        {
+            body.Append('\n');
+            foreach (var (param, meaning) in doc.Params)
+                body.Append($"\n<color=#{ColorUtility.ToHtmlStringRGB(paramFieldFocusBorder)}>{Literal(param)}</color>  {meaning}");
+        }
+
+        string subtitle = null;
+        if (doc.PromptAfter != null)
+            subtitle = doc.PromptAfter.Length == 0
+                ? $"{Literal(doc.PromptBefore)}  {Arrow}  closes the command line"
+                : $"{Literal(doc.PromptBefore)}  {Arrow}  {Literal(doc.PromptAfter)}";
+
+        return new TooltipContent
+        {
+            Title    = Literal(name),
+            Tag      = CliCommandKinds.Label(doc.Kind),
+            TagColor = CliCommandKinds.Color(doc.Kind),
+            Subtitle = subtitle,
+            Body     = body.ToString(),
+            Example  = doc.Example != null ? Literal(doc.Example) : null,
+            Footer   = doc.Note ?? CliCommandKinds.Meaning(doc.Kind),
+        };
+    }
+
+    const string Arrow = "→";
+
+    // Command names are full of "<ip>"-style placeholders TMP would otherwise
+    // try to parse as rich-text tags.
+    static string Literal(string text) => $"<noparse>{text}</noparse>";
 
     void BuildOutputArea()
     {
@@ -975,7 +1446,8 @@ public class CLIPanelManager : MonoBehaviour
         ort.anchorMin = Vector2.zero;
         ort.anchorMax = Vector2.one;
         ort.offsetMin = new Vector2(0, 50);
-        ort.offsetMax = new Vector2(0, -42);
+        ort.offsetMax = new Vector2(0, -(HeaderHeight + LadderHeight)); // RefreshModeLadder reclaims the ladder's strip when it's hidden
+        _outputBgRt = ort;
 
         // ScrollRect fills the background container
         var scrollGo = MakeRect("OutputScroll", outputBg.transform);
@@ -1121,9 +1593,142 @@ public class CLIPanelManager : MonoBehaviour
         _inputField.textComponent = inputTmp;
         _inputField.placeholder   = phTmp;
         _inputField.onSubmit.AddListener(OnInputSubmit);
+        _inputField.onValueChanged.AddListener(OnCliInputValueChanged);
 
         // Tab is used for command completion, not UI focus navigation.
         _inputField.navigation = new Navigation { mode = Navigation.Mode.None };
+
+        // Mask-typing hint — a thin overlay bar directly above the input bar,
+        // not part of its layout (so it never disturbs that hand-tuned row
+        // math) — just floats independently and toggles visibility.
+        _maskHintBar = MakeRect("MaskHint", _panelRoot.transform);
+        var hintImg = _maskHintBar.AddComponent<Image>();
+        hintImg.color = new Color(0f, 0f, 0f, 0.85f);
+        var hintRt = _maskHintBar.GetComponent<RectTransform>();
+        hintRt.anchorMin        = new Vector2(0, 0);
+        hintRt.anchorMax        = new Vector2(1, 0);
+        hintRt.pivot            = new Vector2(0.5f, 0f);
+        hintRt.anchoredPosition = new Vector2(0, 48); // sits directly above the 48-tall input bar
+        hintRt.sizeDelta        = new Vector2(0, 22);
+
+        _maskHintLabel = MakeTMP("MaskHintLabel", _maskHintBar.transform);
+        _maskHintLabel.font      = _font;
+        _maskHintLabel.fontSize  = 11f;
+        _maskHintLabel.alignment = TextAlignmentOptions.MidlineLeft;
+        _maskHintLabel.enableWordWrapping = false;
+        _maskHintLabel.overflowMode = TextOverflowModes.Ellipsis;
+        var hlRt = _maskHintLabel.GetComponent<RectTransform>();
+        hlRt.anchorMin = Vector2.zero;
+        hlRt.anchorMax = Vector2.one;
+        hlRt.offsetMin = new Vector2(206, 0); // aligns under the input field, not the prompt
+        hlRt.offsetMax = new Vector2(-12, 0);
+
+        _maskHintBar.SetActive(false);
+    }
+
+    // ── Live mask-typing hint ────────────────────────────────────────────────
+
+    // Fires on every keystroke while typing a router interface's "ip address
+    // <ip> <mask>" command — classifies whatever's been typed for the mask
+    // token so far (SubnetMath.ClassifyMaskInput) and shows a soft-guardrail
+    // hint: still-possibly-valid, confirmed valid (with usable host count),
+    // or already invalid — without blocking any keystroke. Same information
+    // RouterCLI already reports as a "% Invalid host address" error after
+    // Enter, just surfaced instantly instead of after the fact.
+    void OnCliInputValueChanged(string text)
+    {
+        if (_currentDevice == null || _currentDevice.deviceType != DeviceType.Router)
+        {
+            _maskHintBar.SetActive(false);
+            return;
+        }
+
+        RouterCLI cli = GetOrCreateSession(_currentDevice);
+        string[] tokens = text.Split(' ');
+        bool typingMask = cli.CurrentMode == RouterCLI.Mode.InterfaceConfig &&
+            tokens.Length == 4 &&
+            tokens[0].Equals("ip", System.StringComparison.OrdinalIgnoreCase) &&
+            tokens[1].Equals("address", System.StringComparison.OrdinalIgnoreCase);
+
+        if (!typingMask)
+        {
+            ShowCommandHint(cli, text);
+            return;
+        }
+
+        SetHintLabelLeft(MaskHintLeft);
+        var state = SubnetMath.ClassifyMaskInput(tokens[3]);
+        switch (state)
+        {
+            case SubnetMath.MaskInputState.Empty:
+                _maskHintBar.SetActive(false);
+                return;
+            case SubnetMath.MaskInputState.PossiblyValid:
+                _maskHintLabel.color = GameTheme.Info;
+                _maskHintLabel.text  = "Keep typing — not a complete mask yet.";
+                break;
+            case SubnetMath.MaskInputState.Valid:
+                int prefix = SubnetMath.MaskToPrefixLength(tokens[3]);
+                _maskHintLabel.color = GameTheme.Success;
+                _maskHintLabel.text  = $"= /{prefix} — {SubnetMath.FormatHostCount(prefix)} usable host(s)";
+                break;
+            case SubnetMath.MaskInputState.Invalid:
+                _maskHintLabel.color = GameTheme.Danger;
+                _maskHintLabel.text  = "Not a valid subnet mask.";
+                break;
+        }
+        _maskHintBar.SetActive(true);
+    }
+
+    // The typed path's counterpart of the palette chips: while the first word
+    // is being typed, names the command(s) it could become and what each does
+    // — or says up front that nothing here starts that way, instead of
+    // leaving it to an error after Enter.
+    void ShowCommandHint(RouterCLI cli, string text)
+    {
+        string trimmed = text.TrimStart();
+        int space = trimmed.IndexOf(' ');
+        string first = space >= 0 ? trimmed.Substring(0, space) : trimmed;
+        if (first.Length == 0)
+        {
+            _maskHintBar.SetActive(false);
+            return;
+        }
+
+        List<string> keywords = cli.MatchPrefix(first);
+        if (keywords.Count == 0)
+        {
+            _maskHintLabel.color = GameTheme.Warning;
+            _maskHintLabel.text  = $"No command here starts with \"{Literal(first)}\". Type ? to list them.";
+        }
+        else if (keywords.Count == 1)
+        {
+            var lines = new List<string>();
+            foreach (var (name, desc) in cli.CurrentCommands)
+                if (name.Split(' ')[0].Equals(keywords[0], System.StringComparison.OrdinalIgnoreCase))
+                    lines.Add($"<b>{Literal(name)}</b>  {desc}");
+            _maskHintLabel.color = GameTheme.Info;
+            _maskHintLabel.text  = string.Join("   ", lines);
+        }
+        else
+        {
+            _maskHintLabel.color = GameTheme.Info;
+            _maskHintLabel.text  = "Could be: " + string.Join(", ", keywords.ConvertAll(Literal));
+        }
+
+        SetHintLabelLeft(CommandHintLeft);
+        _maskHintBar.SetActive(true);
+    }
+
+    // The mask hint lines up under the input field (it's about the mask being
+    // typed there); a command hint needs the bar's full width.
+    const float MaskHintLeft    = 206f;
+    const float CommandHintLeft = 12f;
+
+    void SetHintLabelLeft(float left)
+    {
+        var rt = _maskHintLabel.rectTransform;
+        rt.offsetMin = new Vector2(left, rt.offsetMin.y);
     }
 
     /// <summary>
@@ -1134,6 +1739,7 @@ public class CLIPanelManager : MonoBehaviour
     void BuildCommandBuilderPanel()
     {
         var builderRoot = MakeRect("CommandBuilder", _panelRoot.transform);
+        OccupiesScreen.Add(builderRoot, OccupantLayer.Panel); // bulges past _panelRoot's own rect, so it's its own occupant
         var builderImg = builderRoot.AddComponent<Image>();
         builderImg.sprite = PlateSpriteBuilder.GetSprite(sidebarFill, sidebarBorder, trimColor,
             borderThickness: 2, chamfer: 5, pixelScale: 5);
@@ -1147,7 +1753,7 @@ public class CLIPanelManager : MonoBehaviour
 
         // ── Palette title ──
         var paletteTitle      = MakeTMP("PaletteTitle", builderRoot.transform);
-        paletteTitle.text      = "Drag Commands";
+        paletteTitle.text      = "Commands";
         paletteTitle.fontSize  = titleFontSize;
         paletteTitle.color     = Color.white;
         paletteTitle.fontStyle = FontStyles.Bold;
@@ -1158,6 +1764,20 @@ public class CLIPanelManager : MonoBehaviour
         ptrt.pivot     = new Vector2(0.5f, 1f);
         ptrt.offsetMin = new Vector2(12, -30);
         ptrt.offsetMax = new Vector2(-12, -8);
+
+        // Says how the palette works, since nothing else on screen does.
+        var paletteHint      = MakeTMP("PaletteHint", builderRoot.transform);
+        paletteHint.text      = "Hover to learn · click or drag to queue";
+        paletteHint.fontSize  = 10f;
+        paletteHint.color     = new Color(1f, 1f, 1f, 0.6f);
+        paletteHint.alignment = TextAlignmentOptions.TopLeft;
+        paletteHint.raycastTarget = false;
+        var phrt = paletteHint.GetComponent<RectTransform>();
+        phrt.anchorMin = new Vector2(0, 1);
+        phrt.anchorMax = new Vector2(1, 1);
+        phrt.pivot     = new Vector2(0.5f, 1f);
+        phrt.offsetMin = new Vector2(12, -44);
+        phrt.offsetMax = new Vector2(-12, -29);
 
         // ── Palette scroll list (draggable source chips), top ~52% ──
         var paletteScrollGo = MakeRect("PaletteScroll", builderRoot.transform);
@@ -1170,7 +1790,7 @@ public class CLIPanelManager : MonoBehaviour
         psrt.anchorMin = new Vector2(0, 0.52f);
         psrt.anchorMax = new Vector2(1, 1);
         psrt.offsetMin = new Vector2(0, 2);
-        psrt.offsetMax = new Vector2(0, -30);
+        psrt.offsetMax = new Vector2(0, -44);
 
         var paletteViewport = MakeRect("Viewport", paletteScrollGo.transform);
         paletteViewport.AddComponent<RectMask2D>();
@@ -1204,11 +1824,15 @@ public class CLIPanelManager : MonoBehaviour
         queueTitle.color     = Color.white;
         queueTitle.fontStyle = FontStyles.Bold;
         queueTitle.alignment = TextAlignmentOptions.TopLeft;
+        // Hangs down from the 52% split into the 24px gap above the queue
+        // zone (its offsetMax below), mirroring how the palette title sits
+        // just above the palette — it used to sit *above* the split, where
+        // it drew over the palette's bottom row instead.
         var qtrt = queueTitle.GetComponent<RectTransform>();
         qtrt.anchorMin        = new Vector2(0, 0.52f);
         qtrt.anchorMax        = new Vector2(0, 0.52f);
-        qtrt.pivot            = new Vector2(0, 0f);
-        qtrt.anchoredPosition = new Vector2(12, 4);
+        qtrt.pivot            = new Vector2(0, 1f);
+        qtrt.anchoredPosition = new Vector2(12, -3);
         qtrt.sizeDelta        = new Vector2(builderPanelWidth - 24, 18);
 
         // ── Queue drop zone + scroll list, bottom ~52% minus the Run/Clear row ──
@@ -1277,7 +1901,9 @@ public class CLIPanelManager : MonoBehaviour
         var runBtn = runGo.AddComponent<Button>();
         runBtn.targetGraphic = runImg;
         runBtn.onClick.AddListener(RunQueue);
+        ButtonClickGlow.Attach(runGo, runBtn, runFill);
         var rrt = runGo.GetComponent<RectTransform>();
+        _runButtonRt = rrt;
         rrt.anchorMin        = new Vector2(0, 0);
         rrt.anchorMax        = new Vector2(0, 0);
         rrt.pivot            = new Vector2(0, 0);
@@ -1297,6 +1923,7 @@ public class CLIPanelManager : MonoBehaviour
         var clearBtn = clearGo.AddComponent<Button>();
         clearBtn.targetGraphic = clearImg;
         clearBtn.onClick.AddListener(ClearQueue);
+        ButtonClickGlow.Attach(clearGo, clearBtn, clearFill);
         var crt = clearGo.GetComponent<RectTransform>();
         crt.anchorMin        = new Vector2(0, 0);
         crt.anchorMax        = new Vector2(0, 0);
@@ -1351,6 +1978,7 @@ public class CLIPanelManager : MonoBehaviour
     /// <summary>One row in the command queue: a parsed template plus the live input fields the user filled in for its parameters (if any).</summary>
     class QueuedCommand
     {
+        public string Name; // the command-table name it was built from, e.g. "ip address <ip> <mask>"
         public List<CLICommandTemplate.Segment> Segments;
         public readonly Dictionary<string, TMP_InputField> ParamFields = new Dictionary<string, TMP_InputField>();
         public GameObject RowGo;

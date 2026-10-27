@@ -8,7 +8,7 @@ using UnityEngine;
 /// conserve volume) — but entirely self-contained, reading its own
 /// transform's position each frame rather than being told where it's going.
 /// PacketManager.Update() still owns all real packet behaviour (speed, hop
-/// advance, capacity backpressure, delivery/drop) and only ever writes to the
+/// advance, delivery/drop) and only ever writes to the
 /// root transform's position, exactly as before this effect existed; this
 /// component just reacts to that position changing, so none of that timing
 /// changes. Lives on the packet's root GameObject and only ever touches the
@@ -58,7 +58,7 @@ public class PacketTravelEffect : MonoBehaviour
         float t = 0f;
         while (t < SquashOutDuration)
         {
-            t += Time.deltaTime;
+            t += AnimationSpeed.Delta(AnimationKind.Packets);
             if (body == null) yield break;
             body.localScale = Vector3.Lerp(start, squashed, t / SquashOutDuration);
             yield return null;
@@ -72,7 +72,8 @@ public class PacketTravelEffect : MonoBehaviour
     {
         if (suspended || body == null) return;
 
-        popT += Time.deltaTime;
+        float packetSpeed = AnimationSpeed.Get(AnimationKind.Packets);
+        popT += Time.deltaTime * packetSpeed;
         float pop = popT < PopInDuration ? EaseOutBack(Mathf.Clamp01(popT / PopInDuration)) : 1f;
         pop = Mathf.Max(pop, 0f);
 
@@ -83,8 +84,10 @@ public class PacketTravelEffect : MonoBehaviour
         if (delta.sqrMagnitude > 1e-10f)
         {
             body.rotation = Quaternion.LookRotation(delta.normalized, Vector3.up);
+            // Measured against the sped-up travel speed, so a faster Packets
+            // setting doesn't just pin every packet at the stretch cap.
             float speed = delta.magnitude / Mathf.Max(Time.deltaTime, 0.0001f);
-            float stretch = Mathf.Clamp(speed / referenceSpeed, 0.7f, 1.6f);
+            float stretch = Mathf.Clamp(speed / (referenceSpeed * packetSpeed), 0.7f, 1.6f);
             float cross = baseRadius / Mathf.Sqrt(stretch);
             body.localScale = new Vector3(cross, cross, baseRadius * stretch * 2f) * pop;
         }

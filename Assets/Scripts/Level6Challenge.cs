@@ -19,12 +19,14 @@ using UnityEngine;
 /// router hop per ping, so there is no payoff (and no way to actually
 /// simulate) a third hop even though the Router model has a spare port.
 /// </summary>
-public class Level6Challenge : MonoBehaviour
+public class Level6Challenge : MonoBehaviour, IKeepsFinishedBuild
 {
-    readonly List<NetworkDevice> placedPCs = new List<NetworkDevice>();
-    readonly List<NetworkDevice> placedSwitches = new List<NetworkDevice>();
-    NetworkDevice placedRouter;
-    bool pingSucceeded;
+    // Live view of what's on the field — see PlacedDeviceTracker.
+    readonly PlacedDeviceTracker placed = new PlacedDeviceTracker();
+    IReadOnlyList<NetworkDevice> placedPCs => placed.PCs;
+    IReadOnlyList<NetworkDevice> placedSwitches => placed.Switches;
+    NetworkDevice placedRouter => placed.FirstRouter;
+    readonly PacketCoverageTracker packetCoverage = new PacketCoverageTracker();
     bool completionHandled;
 
     void Start()
@@ -38,25 +40,17 @@ public class Level6Challenge : MonoBehaviour
     IEnumerator InitNextFrame()
     {
         yield return null;
+        while (!GameBootstrap.IntroSequenceReady) yield return null;
 
         // Seed with whatever devices already exist when this level starts —
         // a restored save (TopologyLoader, built in Awake, earlier than this
         // Start) counts toward objectives the same as anything placed fresh.
-        foreach (var device in Object.FindObjectsByType<NetworkDevice>(FindObjectsInactive.Exclude))
-        {
-            if (device.deviceType == DeviceType.PC) placedPCs.Add(device);
-            else if (device.deviceType == DeviceType.Switch) placedSwitches.Add(device);
-            else if (device.deviceType == DeviceType.Router && placedRouter == null) placedRouter = device;
-        }
-
-        if (DragDropManager.Instance != null) DragDropManager.Instance.OnDeviceDropped += HandleDeviceDropped;
-        if (PingToolManager.Instance != null) PingToolManager.Instance.OnPingCompleted += HandlePingCompleted;
+        placed.Attach();
+        packetCoverage.Attach();
 
         var tm = TaskManager.Instance;
         if (tm != null)
         {
-            tm.OnTasksChanged += HandleTasksChanged;
-
             tm.RegisterTask("Place four PCs, two Switches, and a Router",
                 () => placedPCs.Count >= 4 && placedSwitches.Count >= 2 && placedRouter != null);
             tm.RegisterTask("Cable two PCs to each Switch, and both Switches to the Router",
@@ -65,39 +59,24 @@ public class Level6Challenge : MonoBehaviour
                 TwoSubnetsOfTwo);
             tm.RegisterTask("Configure both router interfaces with IP addresses and enable them",
                 () => placedRouter != null && Enumerable.Range(0, placedRouter.PortCount).Count(i => placedRouter.IsPortActive(i)) >= 2);
-            tm.RegisterTask("Successfully ping between two PCs in different departments, across the Router",
-                () => pingSucceeded);
+            packetCoverage.RegisterTask(tm, placedPCs);
+
+            // Subscribed only once every task is in — a resumed save's tasks
+            // register already complete one at a time, and the first alone
+            // would otherwise read as the whole level done. A restored
+            // finished build (see IKeepsFinishedBuild) arrives fully complete:
+            // its completion and stars were recorded the first time round,
+            // so the Level Complete panel isn't replayed.
+            completionHandled = tm.Tasks.All(t => t.IsComplete);
+            tm.OnTasksChanged += HandleTasksChanged;
         }
     }
 
     void OnDestroy()
     {
-        if (DragDropManager.Instance != null) DragDropManager.Instance.OnDeviceDropped -= HandleDeviceDropped;
-        if (PingToolManager.Instance != null) PingToolManager.Instance.OnPingCompleted -= HandlePingCompleted;
+        placed.Detach();
+        packetCoverage.Detach();
         if (TaskManager.Instance != null) TaskManager.Instance.OnTasksChanged -= HandleTasksChanged;
-    }
-
-    void HandleDeviceDropped(NetworkDevice device, bool isNewDevice)
-    {
-        if (!isNewDevice) return;
-
-        if (device.deviceType == DeviceType.PC) placedPCs.Add(device);
-        else if (device.deviceType == DeviceType.Switch) placedSwitches.Add(device);
-        else if (device.deviceType == DeviceType.Router && placedRouter == null) placedRouter = device;
-    }
-
-    void HandlePingCompleted(NetworkDevice source, NetworkDevice dest, ReachabilityService.PingResult result)
-    {
-        if (!result.Success || !placedPCs.Contains(source) || !placedPCs.Contains(dest)) return;
-
-        var a = GetAddress(source);
-        var b = GetAddress(dest);
-        if (a == null || b == null) return;
-
-        // Only a cross-subnet ping (i.e. one that actually crossed the
-        // Router) satisfies this level — a same-subnet ping was already the
-        // whole point of Level 5, so it shouldn't complete this one too.
-        if (!SubnetMath.SameSubnet(a.Ip, a.Mask, b.Ip, b.Mask)) pingSucceeded = true;
     }
 
     bool AllPcsCabled()
@@ -176,8 +155,7 @@ public class Level6Challenge : MonoBehaviour
             "Back to Level Select",
             () =>
             {
-                MainMenuBootstrap.OpenLevelSelectOnLoad = true;
-                LoadingScreenManager.LoadScene("MainMenu", "LOADING LEVEL SELECT");
+                LoadingScreenManager.ExitToLevelSelect();
             },
             stars);
     }

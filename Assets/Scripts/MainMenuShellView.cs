@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.UI;
 
 /// <summary>
 /// Typed handles onto the static main-menu shell (logo + the fixed row of
@@ -12,12 +13,13 @@ using UnityEngine;
 /// </summary>
 public class MainMenuShellView : MonoBehaviour
 {
-    public SlidePanel Slide;
     public RectTransform LogoVisual;
+    public CanvasGroup LogoRevealGroup; // see MenuRevealFlash / MainMenuBootstrap.PlayFirstAppearanceReveal
+    public Image LogoGlow;
+    public SlidePanel LogoSlide; // logo's own in/out-of-frame motion — see MainMenuBootstrap.PlayMenuExit/PlayMenuEnter
 
     public MenuButtonRefs Play;
-    public MenuButtonRefs Tutorial;
     public MenuButtonRefs Settings;
     public MenuButtonRefs Feedback;
-    public MenuButtonRefs SkipTutorial;
+    public MenuButtonRefs Quit;
 }

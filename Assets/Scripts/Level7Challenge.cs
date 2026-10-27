@@ -19,12 +19,14 @@ using UnityEngine;
 /// gating, no sidebar locking" style as Level5Challenge/Level6Challenge —
 /// the difference is what the player starts with, not how they're guided.
 /// </summary>
-public class Level7Challenge : MonoBehaviour
+public class Level7Challenge : MonoBehaviour, IKeepsFinishedBuild
 {
-    readonly List<NetworkDevice> placedPCs = new List<NetworkDevice>();
-    NetworkDevice placedRouter;
+    // Live view of what's on the field — see PlacedDeviceTracker.
+    readonly PlacedDeviceTracker placed = new PlacedDeviceTracker();
+    IReadOnlyList<NetworkDevice> placedPCs => placed.PCs;
+    NetworkDevice placedRouter => placed.FirstRouter;
     bool sameSubnetPingSucceeded;
-    bool crossSubnetPingSucceeded;
+    readonly PacketCoverageTracker packetCoverage = new PacketCoverageTracker();
     bool completionHandled;
 
     void Start()
@@ -40,42 +42,38 @@ public class Level7Challenge : MonoBehaviour
     IEnumerator InitNextFrame()
     {
         yield return null;
+        while (!GameBootstrap.IntroSequenceReady) yield return null;
 
-        foreach (var device in Object.FindObjectsByType<NetworkDevice>(FindObjectsInactive.Exclude))
-        {
-            if (device.deviceType == DeviceType.PC) placedPCs.Add(device);
-            else if (device.deviceType == DeviceType.Router && placedRouter == null) placedRouter = device;
-        }
-
-        if (DragDropManager.Instance != null) DragDropManager.Instance.OnDeviceDropped += HandleDeviceDropped;
+        placed.Attach();
+        packetCoverage.Attach();
         if (PingToolManager.Instance != null) PingToolManager.Instance.OnPingCompleted += HandlePingCompleted;
 
         var tm = TaskManager.Instance;
         if (tm != null)
         {
-            tm.OnTasksChanged += HandleTasksChanged;
-
             tm.RegisterTask("Reconnect the disconnected PC", AllPcsCabled);
             tm.RegisterTask("Bring the Router's second interface back online", RouterHasTwoActiveInterfaces);
             tm.RegisterTask("Fix the misaddressed PC", TwoSubnetsOfTwo);
             tm.RegisterTask("Successfully ping between the two PCs in the affected department", () => sameSubnetPingSucceeded);
-            tm.RegisterTask("Successfully ping between departments, across the Router", () => crossSubnetPingSucceeded);
+            packetCoverage.RegisterTask(tm, placedPCs);
+
+            // Subscribed only once every task is in — a resumed save's tasks
+            // register already complete one at a time, and the first alone
+            // would otherwise read as the whole level done. A restored
+            // finished build (see IKeepsFinishedBuild) arrives fully complete:
+            // its completion and stars were recorded the first time round,
+            // so the Level Complete panel isn't replayed.
+            completionHandled = tm.Tasks.All(t => t.IsComplete);
+            tm.OnTasksChanged += HandleTasksChanged;
         }
     }
 
     void OnDestroy()
     {
-        if (DragDropManager.Instance != null) DragDropManager.Instance.OnDeviceDropped -= HandleDeviceDropped;
+        placed.Detach();
+        packetCoverage.Detach();
         if (PingToolManager.Instance != null) PingToolManager.Instance.OnPingCompleted -= HandlePingCompleted;
         if (TaskManager.Instance != null) TaskManager.Instance.OnTasksChanged -= HandleTasksChanged;
-    }
-
-    void HandleDeviceDropped(NetworkDevice device, bool isNewDevice)
-    {
-        if (!isNewDevice) return;
-
-        if (device.deviceType == DeviceType.PC) placedPCs.Add(device);
-        else if (device.deviceType == DeviceType.Router && placedRouter == null) placedRouter = device;
     }
 
     void HandlePingCompleted(NetworkDevice source, NetworkDevice dest, ReachabilityService.PingResult result)
@@ -87,7 +85,6 @@ public class Level7Challenge : MonoBehaviour
         if (a == null || b == null) return;
 
         if (SubnetMath.SameSubnet(a.Ip, a.Mask, b.Ip, b.Mask)) sameSubnetPingSucceeded = true;
-        else crossSubnetPingSucceeded = true;
     }
 
     bool AllPcsCabled()
@@ -156,8 +153,7 @@ public class Level7Challenge : MonoBehaviour
             "Back to Level Select",
             () =>
             {
-                MainMenuBootstrap.OpenLevelSelectOnLoad = true;
-                LoadingScreenManager.LoadScene("MainMenu", "LOADING LEVEL SELECT");
+                LoadingScreenManager.ExitToLevelSelect();
             },
             stars);
     }

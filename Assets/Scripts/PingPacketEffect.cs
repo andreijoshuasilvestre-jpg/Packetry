@@ -45,14 +45,33 @@ public class PingPacketEffect : MonoBehaviour
     /// <summary>Fire-and-forget: spawns a scratch driver object that plays out the whole
     /// source-to-destination journey, then cleans itself up. Does nothing if path is empty
     /// (a failed ping has no walked path to animate — see PingToolManager).</summary>
-    public static void Play(NetworkDevice source, NetworkDevice dest, List<Cable> path, Color color)
+    /// <param name="onLanded">Fires once the journey is over — as the result
+    /// lands on the destination, or as soon as it's cut short (a device
+    /// removed mid-flight) — so callers can clear anything they're showing for
+    /// the ping's duration (PingToolManager's PingSelectBadges).</param>
+    /// <returns>The journey's driver, which lives exactly as long as the
+    /// packet is traveling — destroyed the moment the orb hits the
+    /// destination or the journey is cut short — so a caller can tie
+    /// something to the ping's travel time just by keying it to this object
+    /// (PingToolManager's ActivitySubtitle line). Null if there was nothing to
+    /// animate.</returns>
+    public static PingPacketEffect Play(NetworkDevice source, NetworkDevice dest, List<Cable> path, Color color, System.Action onLanded = null)
     {
-        if (source == null || dest == null || path == null || path.Count == 0) return;
+        if (source == null || dest == null || path == null || path.Count == 0) { onLanded?.Invoke(); return null; }
         var effect = new GameObject("PingPacketJourney").AddComponent<PingPacketEffect>();
-        effect.StartCoroutine(effect.Run(source, dest, path, color));
+        effect.StartCoroutine(effect.Run(source, dest, path, color, onLanded));
+        return effect;
     }
 
-    IEnumerator Run(NetworkDevice source, NetworkDevice dest, List<Cable> path, Color color)
+    // Alive exactly as long as the journey is (see Play's return value), so
+    // marking every frame holds NetworkActivity busy until the orb lands.
+    // Awake too, not just Update: PingToolManager fires OnPingCompleted — and
+    // a level can complete off it — the same frame this is spawned, before
+    // its first Update.
+    void Awake()  => NetworkActivity.MarkActive();
+    void Update() => NetworkActivity.MarkActive();
+
+    IEnumerator Run(NetworkDevice source, NetworkDevice dest, List<Cable> path, Color color, System.Action onLanded)
     {
         List<NetworkDevice> waypoints = PacketManager.BuildWaypoints(source, path);
 
@@ -60,10 +79,17 @@ public class PingPacketEffect : MonoBehaviour
         int exitPortIndex = source.GetPortIndexForCable(path[0]);
         Vector3 exitPoint = exitPortIndex >= 0 ? source.GetPortWorldPoint(exitPortIndex) : source.VisualTopPoint();
 
+        // A PC flashes its monitor and shows the ping symbol instead (see
+        // PCMonitor) — the glow pulse is only the fallback for a device
+        // without one.
         bool peaked = false;
-        PingWipeEffect.PlayGlowPulse(source, exitPoint, color, SourceGlowBuild, SourceGlowHold, SourceGlowFade, () => peaked = true);
-        yield return new WaitUntil(() => peaked);
-        if (source == null) yield break; // device could've been removed mid-effect
+        if (!PCMonitor.PlaySend(source, color, PCMonitor.ScreenGlyph.Ping, () => peaked = true))
+            PingWipeEffect.PlayGlowPulse(source, exitPoint, color, SourceGlowBuild, SourceGlowHold, SourceGlowFade, () => peaked = true);
+        // Also gives up if the source is removed mid-glow — its monitor/wipe
+        // goes with it and would never report the peak, which used to leave
+        // this journey (and anything keyed to its lifetime) waiting forever.
+        yield return new WaitUntil(() => peaked || source == null);
+        if (source == null) { onLanded?.Invoke(); Destroy(gameObject); yield break; } // device could've been removed mid-effect
 
         // ── 2. Spawn the orb, burst the source's own spark swarm outward from
         //      the exit port, and travel hop by hop ──────────────────────────
@@ -85,6 +111,7 @@ public class PingPacketEffect : MonoBehaviour
         ParticleSystem sparks = MagnetizingSparks.CreateSwarmTrail(color);
         MagnetizingSparks.BurstAt(sparks, exitPoint, color);
 
+        bool pathBroken = false;
         for (int hop = 0; hop < path.Count; hop++)
         {
             Cable cable = path[hop];
@@ -98,7 +125,14 @@ public class PingPacketEffect : MonoBehaviour
 
             while (t < 1f)
             {
-                t += TravelSpeed * Time.deltaTime / Mathf.Max(0.0001f, cable.PathLength);
+                // Same "stop quietly" as the between-hops check above, for a
+                // cable removed (directly, or along with a deleted device)
+                // while the orb is partway along it — sampling a destroyed
+                // Cable's line would throw and strand the orb mid-air with
+                // this journey never finishing.
+                if (cable == null) { pathBroken = true; break; }
+
+                t += TravelSpeed * AnimationSpeed.Delta(AnimationKind.Packets) / Mathf.Max(0.0001f, cable.PathLength);
                 float clamped  = Mathf.Min(t, 1f);
                 float sampleT  = reversed ? 1f - clamped : clamped;
                 Vector3 pos = cable.SampleCurve(Mathf.Clamp01(sampleT));
@@ -109,14 +143,16 @@ public class PingPacketEffect : MonoBehaviour
                 MagnetizingSparks.UpdateSwarmTrail(sparks, pos);
                 yield return null;
             }
+            if (pathBroken) break;
 
             bool isFinalHop = hop == path.Count - 1;
-            if (!isFinalHop)
+            if (!isFinalHop && to != null) // to can be deleted the very frame the orb reaches it
             {
                 // A mid-path device the orb visibly passes through — every
                 // type gets the shared touch-bounce, but only a router gets
                 // the extra forwarding wipe (see class comment).
                 PacketDeviceEffect.Play(to, color);
+                AudioManager.Instance?.PlaySfx(SfxId.PacketHop);
                 if (to.deviceType == DeviceType.Router)
                 {
                     int inPort = to.GetPortIndexForCable(cable);
@@ -141,15 +177,22 @@ public class PingPacketEffect : MonoBehaviour
             // method's job, ConvergeAndCling now owns sparks' GameObject.
             MagnetizingSparks.ConvergeAndCling(sparks, entryPoint, dest, color);
 
-            PingWipeEffect.PlayForward(dest, entryPoint, color, DestWipeDuration, () =>
+            System.Action onArrived = () =>
             {
                 PacketDeviceEffect.Play(dest, color, PacketDeviceEffect.PlacementIntensity);
                 PingCheckmarkEffect.Play(dest, color);
-            });
+                AudioManager.Instance?.PlaySfx(SfxId.PacketSuccess);
+                onLanded?.Invoke();
+            };
+            // Green monitor flash + ping symbol on a PC; the directional wipe
+            // is only the fallback for a device without a monitor.
+            if (!PCMonitor.PlayReceive(dest, color, PCMonitor.ScreenGlyph.Ping, onArrived))
+                PingWipeEffect.PlayForward(dest, entryPoint, color, DestWipeDuration, onArrived);
         }
         else
         {
             ConstructionSparks.StopAndDestroy(sparks); // no destination to hand the swarm off to — just end it
+            onLanded?.Invoke();
         }
 
         Destroy(gameObject);
@@ -166,8 +209,9 @@ public class PingPacketEffect : MonoBehaviour
 
         orb.rotation = Quaternion.LookRotation(delta.normalized, Vector3.up);
 
+        // Against the sped-up travel speed — see PacketTravelEffect.LateUpdate.
         float speed = delta.magnitude / Mathf.Max(Time.deltaTime, 0.0001f);
-        float stretch = Mathf.Clamp(speed / TravelSpeed, 0.7f, 1.6f);
+        float stretch = Mathf.Clamp(speed / (TravelSpeed * AnimationSpeed.Get(AnimationKind.Packets)), 0.7f, 1.6f);
         float cross = OrbRadius / Mathf.Sqrt(stretch); // thins the cross-section as it elongates, roughly conserving volume
         orb.localScale = new Vector3(cross, cross, OrbRadius * stretch * 2f);
     }
@@ -179,7 +223,7 @@ public class PingPacketEffect : MonoBehaviour
         float t = 0f;
         while (t < PopInDuration)
         {
-            t += Time.deltaTime;
+            t += AnimationSpeed.Delta(AnimationKind.Packets);
             float p = EaseOutBack(Mathf.Clamp01(t / PopInDuration));
             orb.localScale = Vector3.one * OrbRadius * Mathf.Max(p, 0f);
             yield return null;
@@ -198,7 +242,7 @@ public class PingPacketEffect : MonoBehaviour
         float t = 0f;
         while (t < SquashOutDuration)
         {
-            t += Time.deltaTime;
+            t += AnimationSpeed.Delta(AnimationKind.Packets);
             if (orb == null) yield break;
             orb.localScale = Vector3.Lerp(start, squashed, t / SquashOutDuration);
             yield return null;

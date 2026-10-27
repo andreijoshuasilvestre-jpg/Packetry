@@ -67,14 +67,14 @@ public class Level7SceneSetup : MonoBehaviour
 
         if (CableManager.Instance != null)
         {
-            CableManager.Instance.CreateCable(pcA1, 0, swA, swA.GetFreePorts()[0]);
+            CableManager.Instance.CreatePrebuiltCable(pcA1, 0, swA, swA.GetFreePorts()[0]);
             // Fault 1: PC A2 is deliberately left uncabled — no CreateCable
             // call for it. Its port stays free.
-            CableManager.Instance.CreateCable(swA, swA.GetFreePorts()[0], router, 0);
+            CableManager.Instance.CreatePrebuiltCable(swA, swA.GetFreePorts()[0], router, 0);
 
-            CableManager.Instance.CreateCable(pcB1, 0, swB, swB.GetFreePorts()[0]);
-            CableManager.Instance.CreateCable(pcB2, 0, swB, swB.GetFreePorts()[0]);
-            CableManager.Instance.CreateCable(swB, swB.GetFreePorts()[0], router, 1);
+            CableManager.Instance.CreatePrebuiltCable(pcB1, 0, swB, swB.GetFreePorts()[0]);
+            CableManager.Instance.CreatePrebuiltCable(pcB2, 0, swB, swB.GetFreePorts()[0]);
+            CableManager.Instance.CreatePrebuiltCable(swB, swB.GetFreePorts()[0], router, 1);
         }
 
         ConfigureRouter(router);
@@ -126,7 +126,7 @@ public class Level7SceneSetup : MonoBehaviour
 
     // Configured through the same RouterCLI/CLIPanelManager session path a
     // player would use — not a shortcut straight into NetworkDevice state —
-    // so "show running-config"/"show ip interface brief" reflect real seeded
+    // so "show ip interface brief" reflects real seeded
     // state when the player investigates.
     static void ConfigureRouter(NetworkDevice router)
     {

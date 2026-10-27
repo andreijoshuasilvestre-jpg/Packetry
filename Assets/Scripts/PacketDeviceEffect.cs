@@ -35,53 +35,69 @@ public class PacketDeviceEffect : MonoBehaviour
     string[] colorProps;
     Color glowColor;
     float intensity;
+    AnimationKind kind;
     Coroutine routine;
 
     /// <summary>Plays (or restarts, if already mid-flash) the effect on device.
     /// intensity scales the squash/stretch and glow amplitude — 1 is the
     /// default packet-touch feedback, see PlacementIntensity for a stronger
-    /// preset.</summary>
-    public static void Play(NetworkDevice device, Color tint, float intensity = 1f)
+    /// preset. kind is which animation speed setting it follows: a packet
+    /// touch by default, AnimationKind.Build for a placement landing.</summary>
+    public static void Play(NetworkDevice device, Color tint, float intensity = 1f, AnimationKind kind = AnimationKind.Packets)
     {
         if (device == null) return;
-        Play(device.gameObject, device.visualRoot != null ? device.visualRoot : device.transform, tint, intensity);
+        Play(device.gameObject, device.visualRoot != null ? device.visualRoot : device.transform, tint, intensity, kind);
     }
 
     /// <summary>Same effect, for objects that aren't a NetworkDevice (e.g. a
     /// just-placed Table) — visualRoot is whatever transform should be scaled
     /// for the squash/stretch; pass the object's own transform if it has no
     /// separate visual child.</summary>
-    public static void Play(GameObject target, Transform visualRoot, Color tint, float intensity = 1f)
+    public static void Play(GameObject target, Transform visualRoot, Color tint, float intensity = 1f,
+        AnimationKind kind = AnimationKind.Packets)
     {
         if (target == null) return;
         var effect = target.GetComponent<PacketDeviceEffect>();
         if (effect == null) effect = target.AddComponent<PacketDeviceEffect>();
-        effect.Restart(visualRoot, tint, intensity);
+        effect.Restart(visualRoot, tint, intensity, kind);
     }
 
-    void Restart(Transform visualRoot, Color tint, float intensity)
+    void Restart(Transform visualRoot, Color tint, float intensity, AnimationKind kind)
     {
         if (routine != null) { StopCoroutine(routine); RestoreColors(); }
 
         this.intensity = intensity;
+        this.kind = kind;
         visual = visualRoot != null ? visualRoot : transform;
-        renderers = GetComponentsInChildren<Renderer>();
-        baseColors = new Color[renderers.Length];
-        colorProps = new string[renderers.Length];
+
+        // Not every renderer under a device is the "real" material anymore —
+        // DeviceRimLight stamps an additive Custom/RimGlow shell (no
+        // _BaseColor/_Color, just _RimColor) alongside each one. Skip
+        // anything that exposes neither property rather than assuming _Color
+        // as a blind fallback, which errored on those shells every time this
+        // effect played.
+        var allRenderers = GetComponentsInChildren<Renderer>();
+        var tempRenderers = new System.Collections.Generic.List<Renderer>(allRenderers.Length);
+        var tempProps = new System.Collections.Generic.List<string>(allRenderers.Length);
+        var tempColors = new System.Collections.Generic.List<Color>(allRenderers.Length);
 
         s_block ??= new MaterialPropertyBlock();
-        for (int i = 0; i < renderers.Length; i++)
+        foreach (Renderer r in allRenderers)
         {
-            Renderer r = renderers[i];
-            string prop = r.sharedMaterial.HasProperty("_BaseColor") ? "_BaseColor" : "_Color";
-            colorProps[i] = prop;
+            string prop = ColorPropertyOf(r.sharedMaterial);
+            if (prop == null) continue;
 
             // Read whatever's actually showing right now (subnet tint, drag
             // highlight, ...) rather than the plain material color, so the
             // flash brightens the current look instead of resetting it.
             r.GetPropertyBlock(s_block);
-            baseColors[i] = s_block.isEmpty ? r.sharedMaterial.GetColor(prop) : s_block.GetColor(prop);
+            tempRenderers.Add(r);
+            tempProps.Add(prop);
+            tempColors.Add(s_block.isEmpty ? r.sharedMaterial.GetColor(prop) : s_block.GetColor(prop));
         }
+        renderers  = tempRenderers.ToArray();
+        colorProps = tempProps.ToArray();
+        baseColors = tempColors.ToArray();
 
         glowColor = Color.Lerp(tint, Color.white, 0.6f);
         routine = StartCoroutine(Run());
@@ -92,7 +108,7 @@ public class PacketDeviceEffect : MonoBehaviour
         float t = 0f;
         while (t < Duration)
         {
-            t += Time.deltaTime;
+            t += AnimationSpeed.Delta(kind);
             float decay = Mathf.Exp(-Decay * t);
             float wob   = Mathf.Sin(t * Frequency) * decay;
 
@@ -115,6 +131,17 @@ public class PacketDeviceEffect : MonoBehaviour
         RestoreColors();
         routine = null;
         Destroy(this);
+    }
+
+    // Null (not a blind "_Color" fallback) when a material exposes neither —
+    // e.g. DeviceRimLight's additive Custom/RimGlow shells, which only have
+    // _RimColor. Callers skip any renderer this returns null for.
+    static string ColorPropertyOf(Material mat)
+    {
+        if (mat == null) return null;
+        if (mat.HasProperty("_BaseColor")) return "_BaseColor";
+        if (mat.HasProperty("_Color")) return "_Color";
+        return null;
     }
 
     void RestoreColors()

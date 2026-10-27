@@ -9,13 +9,19 @@ using UnityEngine.InputSystem;
 /// and scroll-wheel zoom also tilts the pitch — top-down when zoomed out,
 /// leveling out toward the plane as you zoom in. Scroll is reserved for zoom;
 /// holding R repurposes it for device rotation instead (see DragDropManager).
+/// The on-screen zoom buttons (ViewControlsHud) zoom through ZoomBy, for a
+/// trackpad with no wheel to scroll.
 /// </summary>
 public class IsometricCamera : MonoBehaviour
 {
     public static IsometricCamera Instance { get; private set; }
 
     [Header("Initial Pose")]
-    private float yawAngle      = 45f;
+    // Square-on, not the old 45° diagonal — tables and the devices on them
+    // read straight across the screen when a level opens. Also where
+    // ResetView returns to. A level that opens with a topology already in
+    // place turns this to face it (see SetOpeningYaw).
+    private float yawAngle      = 90f;
     // GamePlane's actual center — GameBootstrap.SetupPlayArea() never repositions
     // it off the origin, so this must stay in sync with that for rotation (Q/E)
     // to orbit cleanly around the plane instead of drifting off-center.
@@ -45,8 +51,9 @@ public class IsometricCamera : MonoBehaviour
     [SerializeField] private float keyboardPanSpeed = 8f; // world-units per second
 
     [Header("Rotate")]
-    // Pitch/distance never change here — only yaw steps, so players can walk the
-    // camera around a device's sides (for cable ports) without losing the isometric look.
+    // Pitch/distance never change here — only yaw steps (and the view re-centers
+    // on the play area, see RotateStep), so players can walk the camera around
+    // a device's sides (for cable ports) without losing the isometric look.
     [SerializeField] private float rotateStepDegrees = 45f;
 
     [Header("Entrance")]
@@ -59,6 +66,16 @@ public class IsometricCamera : MonoBehaviour
     [SerializeField] private float introDuration  = 1.1f;
 
     private bool introPlaying;
+    // The frame this camera woke up on — nothing has rendered from it yet,
+    // so SetOpeningYaw can still snap instead of visibly swinging round.
+    private int awakeFrame;
+
+    // Debounced disk flush for the saved zoom distance — scrolling fires many
+    // notches in quick succession, so we only write to disk once it settles
+    // (same reasoning as MakeSliderRow's pointer-up flush, adapted for a
+    // continuous input that has no "release" event of its own).
+    const float ZoomSaveDelay = 0.5f;
+    private float zoomSaveTimer = -1f;
 
     private Vector2 lastMousePos;
     private bool isPanning;
@@ -75,14 +92,21 @@ public class IsometricCamera : MonoBehaviour
     {
         if (Instance != null && Instance != this) { Destroy(gameObject); return; }
         Instance = this;
+        awakeFrame = Time.frameCount;
 
         currentLookTarget = lookTarget;
         targetLookTarget  = lookTarget;
         // Resting pose once the intro finishes — near-zoomed-out at the
         // top-down survey angle; scrolling in gradually levels the camera
-        // out toward groundPitch from there (see HandleZoomInput).
-        targetDistance    = startDistance;
-        targetPitch       = PitchForDistance(startDistance);
+        // out toward groundPitch from there (see HandleZoomInput). Restores
+        // the player's last saved zoom level when there is one, so the intro
+        // eases into wherever they left off instead of always startDistance.
+        float savedDistance = SaveManager.Settings.cameraZoomDistance;
+        float restingDistance = savedDistance > 0f
+            ? Mathf.Clamp(savedDistance, minDistance, maxDistance)
+            : startDistance;
+        targetDistance    = restingDistance;
+        targetPitch       = PitchForDistance(restingDistance);
         currentYaw        = yawAngle;
         targetYaw         = yawAngle;
 
@@ -103,10 +127,14 @@ public class IsometricCamera : MonoBehaviour
         float t = 0f;
         while (t < introDuration)
         {
-            t += Time.unscaledDeltaTime;
+            t += AnimationSpeed.UnscaledDelta(AnimationKind.Level); // part of the level's entrance
             float p = 1f - Mathf.Pow(1f - Mathf.Clamp01(t / introDuration), 3f); // ease-out cubic
             orbitDistance = Mathf.Lerp(fromDistance, targetDistance, p);
             currentPitch  = Mathf.LerpAngle(fromPitch, targetPitch, p);
+            // Normally already there — but a SetOpeningYaw that arrives
+            // mid-intro (a template topology merging in late) swings round
+            // during the zoom-out instead of waiting for it to finish.
+            currentYaw    = Mathf.LerpAngle(currentYaw, targetYaw, Time.unscaledDeltaTime * zoomSmoothing);
             ApplyPose();
             yield return null;
         }
@@ -128,24 +156,109 @@ public class IsometricCamera : MonoBehaviour
         transform.position = currentLookTarget - transform.forward * orbitDistance;
     }
 
+    /// <summary>A modal owns the view — the CLI (which wants W/A/S/D and
+    /// scroll for itself), the Settings dialog, or an annotation waiting on its
+    /// button. Shuts off every camera control.</summary>
+    bool ModalOpen =>
+        (CLIPanelManager.Instance != null && CLIPanelManager.Instance.IsOpen) ||
+        InteractionMode.IsSuspended;
+
+    /// <summary>Mouse pan and view rotation are locked: a modal is open, a
+    /// highlighted (selected) placed device is being scroll-rotated in place
+    /// (so it can't drift out from under the edit), or a device/table is being
+    /// placed or dragged (so the framing doesn't drift on its own mid-drag).
+    /// WASD and zoom stay free in the last two cases so the player can still
+    /// reposition the view manually while placing.</summary>
+    bool MouseInputLocked =>
+        ModalOpen ||
+        (DragDropManager.Instance != null && DragDropManager.Instance.HasHighlightedDevice) ||
+        (DragDropManager.Instance != null && DragDropManager.Instance.IsDragging) ||
+        (TableManager.Instance != null && (TableManager.Instance.IsDragging || TableManager.Instance.IsResizing));
+
+    /// <summary>Whether the view can be turned right now — by Q/E or the
+    /// on-screen turn buttons (ViewControlsHud), which follow the same locks.</summary>
+    public bool CanRotate => !MouseInputLocked;
+
+    /// <summary>Whether the view can be reset right now (see ResetView).</summary>
+    public bool CanResetView => !ModalOpen;
+
+    /// <summary>Whether the view can be zoomed right now — by the wheel or the
+    /// on-screen zoom buttons. Only a modal stops it, same as the wheel (see
+    /// Update): zooming stays free mid-drag/placement.</summary>
+    public bool CanZoom => !ModalOpen;
+
+    /// <summary>Room left to zoom in (true) or out (false) — the zoom buttons
+    /// grey out at either end of the range.</summary>
+    public bool CanZoomFurther(bool zoomIn) =>
+        CanZoom && (zoomIn ? targetDistance > minDistance + 0.01f : targetDistance < maxDistance - 0.01f);
+
+    /// <summary>Zooms by `amount` world units of orbit distance, positive in —
+    /// scaled by the Zoom Speed setting like the wheel is.</summary>
+    public void ZoomBy(float amount)
+    {
+        if (!CanZoom || amount == 0f) return;
+        ApplyZoom(amount * SaveManager.Settings.cameraZoomSpeedMultiplier);
+    }
+
+    // The one place zoom changes the pose: distance, the pitch tied to it, and
+    // the debounced save of the new zoom level.
+    void ApplyZoom(float amount)
+    {
+        targetDistance = Mathf.Clamp(targetDistance - amount, minDistance, maxDistance);
+        targetPitch    = PitchForDistance(targetDistance);
+        zoomSaveTimer  = ZoomSaveDelay;
+    }
+
+    /// <summary>Turns the view one step. direction &lt; 0 swings the near side
+    /// of the scene left (Q), &gt; 0 swings it right (E). Also glides the view
+    /// back to the play area's center, so a turn after panning off to one side
+    /// orbits the whole scene instead of swinging it out of frame. Zoom is kept.</summary>
+    public void RotateStep(int direction)
+    {
+        if (!CanRotate || direction == 0) return;
+        targetYaw       += Mathf.Sign(direction) * rotateStepDegrees;
+        targetLookTarget = lookTarget;
+    }
+
+    /// <summary>Turns the opening view to `yaw` — e.g. to face a level's starting
+    /// topology head-on (see GameBootstrap.FaceStartingTopology) — and makes it the
+    /// angle ResetView returns to. Snaps while nothing has rendered yet (a topology
+    /// built in the same frame as this camera); otherwise eases round, during the
+    /// intro zoom-out too (a template scene merges in a frame or more late).</summary>
+    public void SetOpeningYaw(float yaw)
+    {
+        yawAngle  = yaw;
+        targetYaw = targetYaw + Mathf.DeltaAngle(targetYaw, yaw); // the short way round
+        if (Time.frameCount == awakeFrame)
+        {
+            currentYaw = targetYaw;
+            ApplyPose();
+        }
+    }
+
+    /// <summary>Back to the opening framing — angle, zoom and position — for a
+    /// player who's panned or turned themselves somewhere they can't read.</summary>
+    public void ResetView()
+    {
+        if (!CanResetView) return;
+        // Nearest equivalent of the opening yaw, so the reset swings the short
+        // way round instead of unwinding every turn taken so far.
+        targetYaw        = targetYaw + Mathf.DeltaAngle(targetYaw, yawAngle);
+        targetLookTarget = lookTarget;
+        targetDistance   = startDistance;
+        targetPitch      = PitchForDistance(startDistance);
+        zoomSaveTimer    = ZoomSaveDelay;
+    }
+
     void Update()
     {
-        bool cliOpen = (CLIPanelManager.Instance != null && CLIPanelManager.Instance.IsOpen) ||
-                       (SettingsPanelManager.Instance != null && SettingsPanelManager.Instance.IsOpen);
-        // A highlighted (selected) placed device can be scroll-rotated in place —
-        // lock mouse-pan/rotate entirely so it doesn't drift out from under the edit.
-        bool deviceHighlighted = DragDropManager.Instance != null && DragDropManager.Instance.HasHighlightedDevice;
-        // Placing/dragging a device or table locks mouse-pan/rotate too, so the
-        // framing doesn't drift on its own mid-drag; WASD/zoom stay free (see
-        // below) so the player can still reposition the view manually while placing.
-        bool dragging = (DragDropManager.Instance != null && DragDropManager.Instance.IsDragging) ||
-                         (TableManager.Instance != null && TableManager.Instance.IsDragging);
-        bool mouseInputLocked = cliOpen || deviceHighlighted || dragging;
+        bool modalOpen = ModalOpen;
+        bool mouseInputLocked = MouseInputLocked;
 
         // Zoom and keyboard pan stay available even mid-drag/highlight — only
-        // a full-screen modal (the CLI, which wants W/A/S/D and scroll for
-        // itself, or the Settings dialog) shuts them off.
-        if (!cliOpen)
+        // a modal (the CLI, which wants W/A/S/D and scroll for itself, the
+        // Settings dialog, or an annotation waiting on its button) shuts them off.
+        if (!modalOpen)
         {
             HandleZoomInput();
             HandleKeyboardPanInput();
@@ -162,6 +275,28 @@ public class IsometricCamera : MonoBehaviour
         // fighting the intro's own, slower-paced easing every frame.
         if (!introPlaying)
             ApplyLerp();
+
+        if (zoomSaveTimer >= 0f)
+        {
+            zoomSaveTimer -= Time.deltaTime;
+            if (zoomSaveTimer <= 0f)
+                FlushZoomSave();
+        }
+    }
+
+    /// <summary>Writes the current zoom distance into settings and flushes to disk —
+    /// called once scrolling settles (see zoomSaveTimer) and again on teardown in
+    /// case the player quits/leaves the scene mid-debounce.</summary>
+    void FlushZoomSave()
+    {
+        zoomSaveTimer = -1f;
+        SaveManager.Settings.cameraZoomDistance = targetDistance;
+        SaveManager.Save();
+    }
+
+    void OnDestroy()
+    {
+        if (zoomSaveTimer >= 0f) FlushZoomSave();
     }
 
     void HandleZoomInput()
@@ -178,8 +313,8 @@ public class IsometricCamera : MonoBehaviour
         {
             // New Input System reports ~120 units per scroll notch; normalize to 1 notch = 1 step
             scroll /= 120f;
-            targetDistance = Mathf.Clamp(targetDistance - scroll * zoomSpeed, minDistance, maxDistance);
-            targetPitch    = PitchForDistance(targetDistance);
+            float effectiveZoomSpeed = zoomSpeed * SaveManager.Settings.cameraZoomSpeedMultiplier;
+            ApplyZoom(scroll * effectiveZoomSpeed);
         }
     }
 
@@ -201,8 +336,20 @@ public class IsometricCamera : MonoBehaviour
         right.y = 0; right.Normalize();
         Vector3 forward = Vector3.Cross(right, Vector3.up);
 
-        Vector3 moveDelta = (right * x + forward * y).normalized * keyboardPanSpeed * Time.deltaTime;
-        targetLookTarget += moveDelta;
+        float effectivePanSpeed = keyboardPanSpeed * SaveManager.Settings.cameraPanSpeedMultiplier;
+        Vector3 moveDelta = (right * x + forward * y).normalized * effectivePanSpeed * Time.deltaTime;
+        targetLookTarget = ClampToPlayArea(targetLookTarget + moveDelta);
+    }
+
+    /// <summary>Keeps a panned look target over the play area — the view can
+    /// center on its very edge (a corner device) but never drift off into the
+    /// void. Only player pans go through this; FocusOn framings are trusted.</summary>
+    static Vector3 ClampToPlayArea(Vector3 point)
+    {
+        float half = DragDropManager.Instance != null ? DragDropManager.Instance.PlayAreaHalfExtent : 9f;
+        point.x = Mathf.Clamp(point.x, -half, half);
+        point.z = Mathf.Clamp(point.z, -half, half);
+        return point;
     }
 
     void HandlePanInput()
@@ -214,7 +361,10 @@ public class IsometricCamera : MonoBehaviour
             lastMousePos = Mouse.current.position.ReadValue();
         }
 
-        if (Mouse.current.middleButton.wasReleasedThisFrame)
+        // isPressed rather than wasReleasedThisFrame: a release that happened
+        // while mouse input was locked (see Update) never gets seen here, and
+        // would leave the view panning after the button's long been let go.
+        if (!Mouse.current.middleButton.isPressed)
             isPanning = false;
 
         if (!isPanning) return;
@@ -229,7 +379,7 @@ public class IsometricCamera : MonoBehaviour
         Vector3 forward = Vector3.Cross(right, Vector3.up);
 
         Vector3 panDelta = (right * delta.x + forward * delta.y) * panSpeed;
-        targetLookTarget -= panDelta;
+        targetLookTarget = ClampToPlayArea(targetLookTarget - panDelta);
     }
 
     void HandleRotateInput()
@@ -239,9 +389,9 @@ public class IsometricCamera : MonoBehaviour
         if (Keyboard.current == null) return;
 
         if (Keyboard.current.qKey.wasPressedThisFrame)
-            targetYaw -= rotateStepDegrees;
+            RotateStep(-1);
         else if (Keyboard.current.eKey.wasPressedThisFrame)
-            targetYaw += rotateStepDegrees;
+            RotateStep(1);
     }
 
     void ApplyLerp()

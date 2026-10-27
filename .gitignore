@@ -28,5 +28,21 @@ ExportedObj/
 .DS_Store
 Thumbs.db
 
+# Asset Store pack (unused, licence forbids redistribution in a public repo)
+/Assets/OfficePack/
+/Assets/OfficePack.meta
+
+# Narration generator's local Python env + Kokoro model (~350 MB, re-downloaded by the script)
+/Tools/Narration/.venv/
+/Tools/Narration/models/
+
+# Unity crash-recovery scene backups
+/Assets/_Recovery/
+/Assets/_Recovery.meta
+
+# Python bytecode
+__pycache__/
+
 # graphify cache (regenerable)
+/graphify-out/cache/
 /Assets/Scripts/graphify-out/cache/

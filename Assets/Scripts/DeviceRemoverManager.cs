@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.InputSystem;
 
 /// <summary>
@@ -52,7 +53,7 @@ public class DeviceRemoverManager : MonoBehaviour
     {
         if (!isRemoving) return;
         if (CLIPanelManager.Instance != null && CLIPanelManager.Instance.IsOpen) return;
-        if (SettingsPanelManager.Instance != null && SettingsPanelManager.Instance.IsOpen) return;
+        if (InteractionMode.IsSuspended) return;
 
         UpdateHover();
 
@@ -65,13 +66,29 @@ public class DeviceRemoverManager : MonoBehaviour
 
     void UpdateHover()
     {
-        NetworkDevice next = RaycastForDevice();
+        // Destroyed-but-still-referenced hover — same trap (and fix) as
+        // TableRemoverManager.UpdateHover: Unity's == reads it as equal to a
+        // raycast miss, so its indicator would never get hidden.
+        if (!ReferenceEquals(hoveredDevice, null) && hoveredDevice == null)
+        {
+            selectionIndicator?.Hide();
+            hoveredDevice = null;
+        }
+
+        // Over the HUD (a sidebar button, the task panel, a confirm dialog)
+        // the click belongs to that UI, not to whatever device happens to sit
+        // behind it on screen — without this, pressing Cancel on the Home
+        // dialog could delete the device under the button.
+        NetworkDevice next = IsPointerOverUI() ? null : RaycastForDevice();
         if (next == hoveredDevice) return;
 
         SetHighlight(hoveredDevice, false);
         hoveredDevice = next;
         SetHighlight(hoveredDevice, true);
     }
+
+    static bool IsPointerOverUI() =>
+        EventSystem.current != null && EventSystem.current.IsPointerOverGameObject();
 
     NetworkDevice RaycastForDevice()
     {
@@ -112,6 +129,22 @@ public class DeviceRemoverManager : MonoBehaviour
         hoveredDevice = null;
         if (device == null) return;
         selectionIndicator?.Hide(); // about to be destroyed — don't leave the outline tracking it
+        // Here, not in RemoveDevice — that's shared with undo and a table's
+        // cascade, which should stay silent / play once for the whole table.
+        AudioManager.Instance?.PlaySfx(SfxId.Remove);
+        RemoveDevice(device);
+    }
+
+    // Shared with TableRemoverManager, which destroys the devices sitting on a
+    // removed table alongside it — routing that through here (rather than a
+    // bare Destroy()) keeps every device deletion, no matter which tool
+    // triggered it, firing the same OnDeviceRemoved event that
+    // AutoSaveManager/PacketSendManager/TutorialManager already rely on to
+    // react (re-save, drop dangling packet-assignment refs, advance the
+    // tutorial step).
+    public void RemoveDevice(NetworkDevice device)
+    {
+        if (device == null) return;
         OnDeviceRemoved?.Invoke(device);
         Destroy(device.gameObject);
     }

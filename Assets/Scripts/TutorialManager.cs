@@ -2,35 +2,36 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.InputSystem;
 
 /// <summary>
 /// Guided onboarding: trims the sidebar down to PC, Switch, Table, and Cable
 /// (everything else hidden outright), then — one action at a time, with every
 /// other core button locked out until the current one is done — walks the
-/// player through placing a table, placing and rotating a PC, placing a
+/// player through placing and resizing a table, placing and rotating a PC, placing a
 /// second PC and a Switch, learning what ports are, and cabling everything
-/// together. Once the mini-network exists, the rest of the toolset reappears
-/// and the tutorial gets out of the way.
+/// together. Once that switch-to-PCs topology exists, a second phase teaches
+/// undoing it: Remove Cable (already the remove button's default face, so no
+/// flyout needed), then Remove Device and Remove Table, both reached via the
+/// remove button's flyout (see the TeachRemoveFlyout steps and
+/// FlyoutRevealGate/FlyoutItemTarget, which highlight the button's arrow tab
+/// first and retarget that same highlight onto the specific flyout icon once
+/// it opens — TeachDeviceFlyout's Switch step does the same two-beat
+/// highlight for placing devices). Once both phases are done, the rest of the toolset
+/// reappears and the tutorial gets out of the way.
 ///
 /// Reuses TaskManager's Func&lt;bool&gt; CheckCondition polling idiom rather than
 /// inventing a parallel one, and reuses DragDropManager.OnDeviceDropped /
-/// CableManager.OnCableCreated / TableManager.OnTablePlaced for step detection
-/// instead of scanning the scene. Deliberately does NOT register with
-/// InteractionMode.CancelOthers — it never claims an exclusive input mode of
-/// its own, it only locks individual sidebar buttons and draws non-blocking
-/// overlays, so it has nothing for that mutual-exclusion gate to cancel.
+/// CableManager.OnCableCreated / OnCableRemoved / TableManager.OnTablePlaced /
+/// OnTableResized / DeviceRemoverManager.OnDeviceRemoved / TableRemoverManager.OnTableRemoved
+/// for step detection instead of scanning the scene. Deliberately does NOT
+/// register with InteractionMode.CancelOthers — it never claims an exclusive
+/// input mode of its own, it only locks individual sidebar buttons and draws
+/// non-blocking overlays, so it has nothing for that mutual-exclusion gate to
+/// cancel.
 /// </summary>
-public class TutorialManager : MonoBehaviour
+public class TutorialManager : MonoBehaviour, INarratedLevel
 {
     public static TutorialManager Instance { get; private set; }
-
-    // Set by MainMenuBootstrap's temporary "Skip Tutorial (Dev)" button before
-    // loading the gameplay scene — a developer convenience for testing new
-    // features without playing through the tutorial every run. Static fields
-    // survive the menu -> gameplay scene load within the same Play session.
-    // Meant to be removed along with that button once no longer needed.
-    public static bool SkipOnNextLoad;
 
     // Minimum rotation (degrees) the "rotate the device" step requires before
     // it counts as done — enough to prove a deliberate R+scroll gesture
@@ -57,15 +58,9 @@ public class TutorialManager : MonoBehaviour
     // key, enough to prove a deliberate press without feeling like a chore.
     const float PanThresholdDistance = 2f;
 
-    // How far below the devices/cable compound button's own row the callout gets
-    // nudged for the one step that leaves that button's flyout open to the player
-    // (TutorialStep.TeachDeviceFlyout) — clears the flyout's row height (one
-    // button tall) so the callout never sits underneath/behind the flyout it's
-    // describing. See TutorialUIManager.Show's offsetY param.
-    const float TeachFlyoutCalloutOffsetY = -200f;
-
-    private bool qPressedThisStep;
-    private bool ePressedThisStep;
+    // IsometricCamera.TargetYaw when the "turn the view" step began — any turn
+    // away from it (button or Q/E, either direction) completes the step.
+    private float? yawBaseline;
     private Vector3? panBaselinePos;
     // True once the current step's marker B (and TextAfterGate, if any) has
     // been revealed — see TutorialStep.WorldMarkerBGate / RevealWorldMarkerB.
@@ -78,13 +73,49 @@ public class TutorialManager : MonoBehaviour
         public DeviceType? HighlightDevice; // sidebar device button to highlight/unlock, if any
         public bool HighlightCable;          // highlight/unlock the Cable button instead
         public bool HighlightTable;          // highlight/unlock the Table button instead
+        // Reveals (if not already revealed) and forces the remove compound
+        // button's face to this specific tool for this step — see
+        // ApplyStepButtonLock and removeRevealed. Only ever set to
+        // RemoveToolKind.Cable (Device/Table are reached via TeachRemoveFlyout
+        // instead, below, since forcing a face doesn't teach the flyout).
+        public RemoveToolKind? HighlightRemove;
         // True only for the step that teaches NetworkUIManager's devices/cable
-        // compound button's right-click flyout (see BuildDevicesCableCompound):
+        // compound button's flyout (see BuildDevicesCableCompound):
         // leaves that button fully unrestricted (any of the four tools reachable,
         // flyout included) instead of forcing HighlightDevice/HighlightCable's
-        // tool directly, and nudges the callout below the flyout's row so the
-        // two never overlap — see EnterStep's offsetY.
+        // tool directly, and tells TutorialUIManager.Show to clear the flyout's
+        // row (see its clearFlyoutBelow param) so the two never overlap. The
+        // step's callout points at the button's arrow tab (see FlyoutArrowTab),
+        // which only shows while the flyout is unlocked, so this step is also
+        // where the arrow first appears.
         public bool TeachDeviceFlyout;
+        // Same idea as TeachDeviceFlyout, for the remove compound button's own
+        // flyout (Remove Device/Remove Table) — see
+        // ApplyStepButtonLock/SetRemoveToolUnrestricted.
+        public bool TeachRemoveFlyout;
+        // Two-beat UI highlight for an "open the flyout with its arrow, then
+        // click this specific item" step — parallel to WorldMarkerBGate/
+        // TextAfterGate but retargeting the sidebar highlight beacon (see
+        // TutorialUIManager.Show's `target`) instead of a world-space marker.
+        // Unlike WorldMarkerBGate (a one-shot latch), FlyoutRevealGate is
+        // polled every frame FOR AS LONG AS THE STEP IS ACTIVE (typically
+        // DevicesToolReachable/RemoveToolReachable, built on NetworkUIManager.
+        // IsDevicesFlyoutOpen/IsRemoveFlyoutOpen, which are only true once the
+        // flyout's pop-in animation has actually settled — see
+        // CompoundSidebarGroup.FlyoutSettled) and the highlight
+        // is toggled both ways: onto FlyoutItemTarget (with TextAfterFlyoutOpen)
+        // whenever it's true, back onto the step's own arrow-tab target
+        // (with Text) whenever it goes false again — e.g. the player
+        // clicking away to cancel, or closing and reopening the flyout. A
+        // one-shot latch here would leave the highlight's continuous
+        // scale-pulse (see PulsingHighlight) fighting the flyout's own
+        // pop-in/pop-out scale animation on every subsequent open/close.
+        public Func<bool> FlyoutRevealGate;
+        // Any other UI element to point at (instead of a sidebar button) —
+        // e.g. ViewControlsHud's turn buttons. Wins over the Highlight* flags.
+        public Func<RectTransform> HighlightUi;
+        public Func<RectTransform> FlyoutItemTarget;
+        public string TextAfterFlyoutOpen;
         // Pure camera-control steps (zoom/rotate the view) — nothing is ever
         // placed yet this early, but this also locks out selecting/dragging
         // any already-placed device, so a step whose whole point is "learn to
@@ -120,6 +151,35 @@ public class TutorialManager : MonoBehaviour
         // read as two beats ("pick it up" -> once picked up, "here's where
         // to drop it") without needing two separate TutorialStep entries.
         public string TextAfterGate;
+        // For a step whose two spots are two separate clicks in a row (the
+        // table's two corners): only the NEXT spot is ever marked — marker B
+        // replaces marker A when WorldMarkerBGate opens, instead of joining
+        // it. And unlike the default one-shot latch, the gate stays live both
+        // ways for the whole step (same two-way handling as FlyoutRevealGate):
+        // if it closes again — the player cancelled after the first click —
+        // marker A and Text come back, so the callout never asks for a second
+        // click the game is no longer waiting on.
+        public bool WorldMarkersInSequence;
+        // What each marker's mouse acts out (see MouseGesture) — a plain
+        // click unless the step says otherwise: Hold on a device to pick up,
+        // Release on a drop spot.
+        public MouseGesture MarkerAGesture = MouseGesture.Click;
+        public MouseGesture MarkerBGesture = MouseGesture.Click;
+        // Tints this step's markers (null = WorldPulseMarker's own gold) — a
+        // HighlightTable step is always TableMarkerColor without asking.
+        public Color? MarkerColor;
+        // "Drag from here to there" arrow trail (see DragPathGuide) — built
+        // fresh on step entry, its ends re-resolved live, so it simply stays
+        // hidden until both ends exist (e.g. a flyout item before the flyout
+        // opens). A world end is marked by WorldMarkers, not doubled here.
+        // On a step with WorldMarkerBGate the trail leads to marker B, so it's
+        // revealed together with it rather than at step entry.
+        public Func<DragGuideRoute> Drag;
+        // Shows Drag from step entry anyway, and keeps it through both beats —
+        // for a drag short enough that waiting for marker B leaves it no room
+        // to show (a table edge already halfway to its spot), where seeing
+        // the whole way before grabbing is the point.
+        public bool DragFromStepStart;
     }
 
     public bool IsActive { get; private set; }
@@ -129,6 +189,15 @@ public class TutorialManager : MonoBehaviour
 
     private bool tablePlaced;
     private Table placedTable;
+
+    // The "resize your table" step: which edge it suggests dragging (see
+    // PickResizeTarget), the spot it suggests dragging that edge to (picked
+    // as the step starts, then held still so it doesn't run ahead of the
+    // edge being dragged), and whether a resize has made the table bigger yet.
+    private Vector2Int resizeSide = new Vector2Int(1, 0);
+    private Vector3? resizeTarget;
+    private bool tableGrownThisStep;
+    private readonly List<ScreenOccupancy.Entry> resizeOccupied = new();
     private int placedPCCount;
     private int placedSwitchCount;
     private int cablesConnectedToSwitch;
@@ -149,6 +218,27 @@ public class TutorialManager : MonoBehaviour
     // (see TableMarkerPos, which those spots reuse before the device exists).
     private NetworkDevice secondPlacedPC;
     private NetworkDevice placedSwitch;
+
+    // Set true once the matching removal-teaching step's action has actually
+    // happened — see HandleCableRemoved/HandleDeviceRemoved/HandleTableRemoved.
+    // Each is reset false on its own step's OnEnter. Deliberately permissive
+    // about WHICH cable/device gets removed (there's more than one of each by
+    // the time these steps run) rather than tracking one specific target.
+    private bool cableRemovedThisStep;
+    private bool deviceRemovedThisStep;
+    private bool tableRemovedThisStep;
+
+    // True once the remove compound button has been revealed at least once
+    // (see the "remove a cable" step) — from then on it stays visible for the
+    // rest of the tutorial (same idea as Table, which is visible the whole
+    // time), just locked/unlocked per step like every other tool.
+    private bool removeRevealed;
+
+    // Tracks which side of TutorialStep.FlyoutRevealGate's toggle the
+    // highlight is currently showing — false = the step's own face-button
+    // target (the default, set by EnterStep), true = FlyoutItemTarget. See
+    // Update()/RevealFlyoutTarget/RestoreFaceTarget.
+    private bool flyoutTargetRevealed;
 
     // Step-aware, not just "is this device type taught at all this tutorial" —
     // DevicePalette's in-world PC/Switch/Router models sit in the scene the
@@ -188,14 +278,11 @@ public class TutorialManager : MonoBehaviour
     void Start()
     {
         // This guided walkthrough is Level 1's onboarding specifically — any
-        // other level (see LevelManager) gets the full toolset from frame one,
-        // same as the dev-only SkipOnNextLoad flow, and supplies its own
-        // guided objectives via TaskManager instead (see Level2Guide, Level3Guide).
-        bool skip = SkipOnNextLoad
-                 || (LevelManager.Instance != null && LevelManager.Instance.CurrentLevel != 1);
-        if (skip)
+        // other level (see LevelManager) gets the full toolset from frame one
+        // and supplies its own guided objectives via TaskManager instead (see
+        // Level2Guide, Level3Guide).
+        if (LevelManager.Instance != null && LevelManager.Instance.CurrentLevel != 1)
         {
-            SkipOnNextLoad = false;
             IsActive = false;
             return; // full toolset from frame one, nothing restricted, nothing built
         }
@@ -216,10 +303,26 @@ public class TutorialManager : MonoBehaviour
 
         if (DragDropManager.Instance != null) DragDropManager.Instance.OnDeviceDropped += HandleDeviceDropped;
         if (CableManager.Instance != null) CableManager.Instance.OnCableCreated += HandleCableCreated;
+        if (CableManager.Instance != null) CableManager.Instance.OnCableRemoved += HandleCableRemoved;
         if (TableManager.Instance != null) TableManager.Instance.OnTablePlaced += HandleTablePlaced;
+        if (TableManager.Instance != null) TableManager.Instance.OnTableResized += HandleTableResized;
+        if (DeviceRemoverManager.Instance != null) DeviceRemoverManager.Instance.OnDeviceRemoved += HandleDeviceRemoved;
+        if (TableRemoverManager.Instance != null) TableRemoverManager.Instance.OnTableRemoved += HandleTableRemoved;
 
         IsActive = true;
+        // Runs here — one frame after scene load, well before NetworkUIManager
+        // actually queues its button reveal-flash (see StaggerRevealFlashChildren/
+        // QueueRevealFlash, deferred two more frames past construction) — so a
+        // tool this tutorial hasn't unlocked yet is already inactive by the time
+        // that queueing decision runs, instead of flashing in and then vanishing.
         HideUnneededButtons();
+
+        // Hold off on the tutorial's first annotation/highlight until the
+        // whole opening sequence (blank background → platform → walls →
+        // HUD buttons) has actually finished — see GameBootstrap.
+        // IntroSequenceReady.
+        while (!GameBootstrap.IntroSequenceReady) yield return null;
+
         EnterStep(0);
     }
 
@@ -227,7 +330,11 @@ public class TutorialManager : MonoBehaviour
     {
         if (DragDropManager.Instance != null) DragDropManager.Instance.OnDeviceDropped -= HandleDeviceDropped;
         if (CableManager.Instance != null) CableManager.Instance.OnCableCreated -= HandleCableCreated;
+        if (CableManager.Instance != null) CableManager.Instance.OnCableRemoved -= HandleCableRemoved;
         if (TableManager.Instance != null) TableManager.Instance.OnTablePlaced -= HandleTablePlaced;
+        if (TableManager.Instance != null) TableManager.Instance.OnTableResized -= HandleTableResized;
+        if (DeviceRemoverManager.Instance != null) DeviceRemoverManager.Instance.OnDeviceRemoved -= HandleDeviceRemoved;
+        if (TableRemoverManager.Instance != null) TableRemoverManager.Instance.OnTableRemoved -= HandleTableRemoved;
     }
 
     void Update()
@@ -236,15 +343,40 @@ public class TutorialManager : MonoBehaviour
 
         var step = steps[stepIndex];
 
+        // Checked before the gates below: the action that completes a step
+        // can also close its gate on the same frame (placing the table ends
+        // placement mode, clearing its first corner), and the step is done —
+        // there's nothing to revert.
+        if (step.CheckCondition != null && step.CheckCondition())
+        {
+            AdvanceStep();
+            return;
+        }
+
         // Marker B's reveal (and the matching callout text swap) can be held
         // back behind a live condition instead of appearing the instant the
         // step starts — see WorldMarkerBGate. Polled every frame until it
-        // fires once; after that it stays revealed for the rest of the step.
-        if (!worldMarkerBRevealed && step.WorldMarkerBGate != null && step.WorldMarkerBGate())
-            RevealWorldMarkerB(step);
+        // fires once; after that it stays revealed for the rest of the step,
+        // unless the step's markers are a sequence (WorldMarkersInSequence),
+        // which puts marker A back if the gate closes again.
+        if (step.WorldMarkerBGate != null)
+        {
+            if (!worldMarkerBRevealed && step.WorldMarkerBGate())
+                RevealWorldMarkerB(step);
+            else if (worldMarkerBRevealed && step.WorldMarkersInSequence && !step.WorldMarkerBGate())
+                RestoreWorldMarkerA(step);
+        }
 
-        if (step.CheckCondition != null && step.CheckCondition())
-            AdvanceStep();
+        // Same idea, for the sidebar highlight instead of a world marker —
+        // see TutorialStep.FlyoutRevealGate. Two-way (unlike WorldMarkerBGate
+        // above): toggles the highlight back onto the face button if the
+        // flyout closes again before the step's CheckCondition is satisfied.
+        if (step.FlyoutRevealGate != null)
+        {
+            bool open = step.FlyoutRevealGate();
+            if (open && !flyoutTargetRevealed) { flyoutTargetRevealed = true; RevealFlyoutTarget(step); }
+            else if (!open && flyoutTargetRevealed) { flyoutTargetRevealed = false; RestoreFaceTarget(step); }
+        }
     }
 
     // Deferred reveal of marker B — see WorldMarkerBGate on TutorialStep and
@@ -256,15 +388,83 @@ public class TutorialManager : MonoBehaviour
     {
         worldMarkerBRevealed = true;
 
+        if (step.WorldMarkersInSequence) TutorialUIManager.Instance?.HideWorldMarker(0);
+
         var markers = step.WorldMarkers?.Invoke();
         if (markers.HasValue && markers.Value.b.HasValue)
         {
             var devices = step.WorldMarkerDevices?.Invoke();
-            TutorialUIManager.Instance?.ShowWorldMarker(1, markers.Value.b.Value, devices?.b);
+            TutorialUIManager.Instance?.ShowWorldMarker(1, markers.Value.b.Value, devices?.b, step.MarkerBGesture);
         }
+
+        if (step.Drag != null && !step.DragFromStepStart) TutorialUIManager.Instance?.ShowDragGuide(step.Drag());
 
         if (step.TextAfterGate != null)
             TutorialUIManager.Instance?.UpdateText(step.TextAfterGate);
+    }
+
+    // The reverse of RevealWorldMarkerB, for a WorldMarkersInSequence step
+    // whose gate closed again (see the call site in Update()) — back to the
+    // step's first beat exactly as EnterStep showed it.
+    void RestoreWorldMarkerA(TutorialStep step)
+    {
+        worldMarkerBRevealed = false;
+
+        TutorialUIManager.Instance?.HideWorldMarker(1);
+        if (!step.DragFromStepStart) TutorialUIManager.Instance?.HideDragGuide();
+
+        var markers = step.WorldMarkers?.Invoke();
+        if (markers.HasValue && markers.Value.a.HasValue)
+        {
+            var devices = step.WorldMarkerDevices?.Invoke();
+            TutorialUIManager.Instance?.ShowWorldMarker(0, markers.Value.a.Value, devices?.a, step.MarkerAGesture);
+        }
+
+        if (step.TextAfterGate != null)
+            TutorialUIManager.Instance?.UpdateText(step.Text);
+    }
+
+    // Retargets the sidebar highlight beacon onto a specific flyout item —
+    // see TutorialStep.FlyoutRevealGate/FlyoutItemTarget/TextAfterFlyoutOpen
+    // and the call site in Update(). Re-invokes FlyoutItemTarget rather than
+    // caching it, same reasoning as RevealWorldMarkerB re-invoking WorldMarkers.
+    void RevealFlyoutTarget(TutorialStep step)
+    {
+        var rect = step.FlyoutItemTarget?.Invoke();
+        if (rect != null && step.TextAfterFlyoutOpen != null)
+            TutorialUIManager.Instance?.RetargetHighlight(rect, step.TextAfterFlyoutOpen);
+    }
+
+    // Mirror of RevealFlyoutTarget for the other direction — the flyout
+    // closed again (cancelled, or closed-and-not-yet-reopened) before the
+    // step's own action happened, so the highlight moves back onto the same
+    // face-button target/text EnterStep originally showed for this step.
+    void RestoreFaceTarget(TutorialStep step)
+    {
+        RectTransform rect = ResolveStepTarget(step);
+        TutorialUIManager.Instance?.RetargetHighlight(rect, step.Text);
+    }
+
+    // Shared by EnterStep (initial target) and RestoreFaceTarget (reverting
+    // after a cancelled flyout) — which single sidebar button, if any, this
+    // step's callout points at.
+    RectTransform ResolveStepTarget(TutorialStep step)
+    {
+        if (step.HighlightUi != null) return step.HighlightUi();
+
+        var ui = NetworkUIManager.Instance;
+        if (ui == null) return null;
+
+        // A flyout-teaching step points at the arrow tab that opens the
+        // flyout (see FlyoutArrowTab), not the button itself.
+        if (step.TeachDeviceFlyout) return ui.DevicesFlyoutArrowRect;
+        if (step.TeachRemoveFlyout) return ui.RemoveFlyoutArrowRect;
+
+        if (step.HighlightDevice.HasValue) return ui.GetDeviceButtonRect(step.HighlightDevice.Value);
+        if (step.HighlightCable) return ui.CableButtonRect;
+        if (step.HighlightTable) return ui.TableButtonRect;
+        if (step.HighlightRemove.HasValue || step.TeachRemoveFlyout) return ui.RemoveButtonRect;
+        return null;
     }
 
     // ── Step definitions ─────────────────────────────────────────────────────
@@ -274,13 +474,16 @@ public class TutorialManager : MonoBehaviour
         steps = new List<TutorialStep>
         {
             // 0 — Welcome
-            new() { Text = "Welcome! Let's build your first network together, one step at a time. Click Next to begin." },
+            new() { Text = "Welcome! Let's build your first network together, one step at a time. Tip: rest your mouse on any button to see what it does. Click Next to begin." },
 
             // 1 — Zoom in: no sidebar action, pure camera control, taught before
             // anything else since every later step is easier to see and click
-            // accurately once the player isn't stuck fully zoomed out.
-            new() { Text = "Let's get a closer look first. Scroll your mouse wheel to zoom in on the play area.",
+            // accurately once the player isn't stuck fully zoomed out. Points at
+            // ViewControlsHud's zoom buttons — the way in for a trackpad, which
+            // has no wheel to scroll.
+            new() { Text = "Let's get a closer look first. Zoom in on the play area: scroll your mouse wheel, or click the zoom-in button in the bottom-right corner.",
                      CameraOnly = true,
+                     HighlightUi = () => ViewControlsHud.Instance != null ? ViewControlsHud.Instance.ZoomButtonsRect : null,
                      CheckCondition = CheckZoomedIn },
 
             // 1b — Pan tip: no sidebar action, pure camera control. Gated the
@@ -293,41 +496,81 @@ public class TutorialManager : MonoBehaviour
                      OnEnter = () => panBaselinePos = null,
                      CheckCondition = CheckPanned },
 
-            // 2 — Rotate the view: no sidebar action, pure camera control. Requires
-            // BOTH keys (not just one pressed twice) so the player deliberately
-            // tries rotating each direction, not just discovers one by accident.
-            new() { Text = "You can also rotate your view. Press <key>Q</key> to turn left and <key>E</key> to turn right — try both.",
+            // 2 — Turn the view: no sidebar action, pure camera control. Points
+            // at ViewControlsHud's on-screen turn buttons — Q/E used to be the
+            // only way, and keys alone were hard to remember or read ("turn
+            // left" spins the scene clockwise). The buttons stay on screen with
+            // the keys printed on them, so one turn either way is enough here.
+            new() { Text = "You can also turn the view to see things from another side. Click a turn button in the bottom-right corner (or press <key>Q</key> / <key>E</key>).",
                      CameraOnly = true,
-                     OnEnter = () => { qPressedThisStep = false; ePressedThisStep = false; },
+                     HighlightUi = () => ViewControlsHud.Instance != null ? ViewControlsHud.Instance.TurnButtonsRect : null,
+                     OnEnter = () => yawBaseline = null,
                      CheckCondition = CheckCameraRotated },
 
-            // 3 — Place a table (two clicks: opposite corners), with pulsing
-            // click-zone circles marking exactly where to click.
-            new() { Text = "Every device needs somewhere to sit. Click <b>Table</b>, then click near the first glowing circle, then the second, to size a table between them.",
+            // 3 — Place a table: two separate clicks, one per corner, taught as
+            // two beats so neither reads as a drag. Only the corner that's
+            // next is ever marked (WorldMarkersInSequence): the first until
+            // TableManager has fixed it, then the opposite one — placed off
+            // wherever that first click actually landed (see
+            // SecondTableCornerPos), with the text saying the first corner is
+            // done. No drag trail between the corners either — a trail is
+            // this game's "drag from here to there" sign, which is exactly
+            // the misreading this step has to avoid. Cancelling after the
+            // first click (right-click, or Table again) puts beat one back.
+            new() { Text = "Every device needs somewhere to sit. Click <b>Table</b>, then click the glowing circle <b>once</b> to set the table's first corner.",
+                     TextAfterGate = "First corner set! Now move your mouse to the new glowing circle — the table stretches to follow — and click <b>once</b> more to set the opposite corner.",
                      HighlightTable = true,
                      CheckCondition = () => tablePlaced,
-                     WorldMarkers = () => (TableCornerA, TableCornerB) },
+                     WorldMarkers = () => (TableCornerA, SecondTableCornerPos()),
+                     WorldMarkerBGate = () => TableManager.Instance != null && TableManager.Instance.HasOrigin,
+                     WorldMarkersInSequence = true },
 
-            // 4 — Place the first PC
-            new() { Text = "Click <b>PC</b>, move your mouse over the table, then left-click to drop it there. It must land inside the table's glowing outline.",
+            // 3b — Select the table, while it's still empty, so its resize
+            // handles show.
+            new() { Text = "Tables can be resized. Click your table <b>once</b> to select it.",
+                     CheckCondition = () => TableManager.Instance != null && TableManager.Instance.ShowsResizeHandles,
+                     WorldMarkers = () => (PlacedTableMarkerPos(), null),
+                     MarkerColor = TableMarkerColor },
+
+            // 3c — Drag one edge's handle out to the marked spot, the same
+            // hold → release beats as the "move your PC" step: the hold marker
+            // sits on the handle itself, and once the edge is being dragged it
+            // gives way to the release marker. A straight trail (an edge only
+            // moves in a straight line) runs from the handle to the spot from
+            // the start, so the whole drag shows before it's begun. Letting go
+            // short of growing the table puts the hold marker back. Only
+            // growing it counts, so the PCs and switch still have room after it.
+            new() { Text = "Handles appeared on its corners and edges. Press and hold the marked edge handle.",
+                     TextAfterGate = "Keep holding, drag the edge out to the glowing circle, then let go to make the table bigger.",
+                     OnEnter = () => { tableGrownThisStep = false; PickResizeTarget(); },
+                     CheckCondition = () => tableGrownThisStep,
+                     WorldMarkers = () => (ResizeHandlePos(), resizeTarget),
+                     WorldMarkerBGate = () => TableManager.Instance != null && TableManager.Instance.IsResizing,
+                     WorldMarkersInSequence = true,
+                     MarkerAGesture = MouseGesture.Hold,
+                     MarkerBGesture = MouseGesture.Release,
+                     MarkerColor = TableMarkerColor,
+                     // Follows the edge as it's dragged — so no InProgress fade.
+                     Drag = () => new DragGuideRoute(GuideAnchor.World(ResizeHandlePos), GuideAnchor.World(() => resizeTarget),
+                         color: TableMarkerColor, straight: true),
+                     DragFromStepStart = true },
+
+            // 4 — Place the first PC. Starts with the table deselected — the
+            // resize steps leave it selected, handles and all, which would only
+            // clutter the drop.
+            new() { Text = "Press and hold <b>PC</b>, drag it over the table, then let go to drop it there. It must land inside the table's glowing outline.",
+                     OnEnter = () => TableManager.Instance?.ClearHighlight(),
                      HighlightDevice = DeviceType.PC,
                      CheckCondition = () => placedPCCount >= 1,
-                     WorldMarkers = () => (PcMarkerPos(-1), null) },
+                     WorldMarkers = () => (PcMarkerPos(-1), null),
+                     MarkerAGesture = MouseGesture.Release,
+                     Drag = () => PaletteRoute(CompoundToolKind.PC, () => PcMarkerPos(-1)) },
 
-            // 5 — Exit sticky placement mode: dropping a PC leaves you still
-            // "holding" the next one. Two ways out, both taught here and both
-            // satisfied by the same condition (DragDropManager.IsDragging goes
-            // false either way): right-click cancels the pending ghost outright,
-            // or left-clicking the placed PC directly cancels it AND hands that
-            // same click straight to the select gesture (see DragDropManager.
-            // Update's isDragging branch), skipping straight to "selected."
-            new() { Text = "You're still holding another PC. Right-click anywhere to cancel it — or left-click your placed PC directly to select it in one step.",
-                     CheckCondition = () => DragDropManager.Instance != null && !DragDropManager.Instance.IsDragging },
-
-            // 6 — Rotate it: no sidebar action, pure 3D-viewport control. If the
-            // previous step was resolved by left-clicking the PC directly, it's
-            // already selected/highlighted here — the wording covers both cases.
-            new() { Text = "Now rotate it: left-click your PC to select it if it isn't already glowing cyan, then hold <key>R</key> and scroll the mouse wheel.",
+            // 6 — Rotate it: no sidebar action. The highlight sits on
+            // DeviceRotateHud's buttons, which only appear once the PC is
+            // selected — so it shows up as the second beat by itself.
+            new() { Text = "Now rotate it: left-click your PC to select it (it glows cyan), then click a rotate button at the bottom of the screen. (Holding <key>R</key> and scrolling works too.)",
+                     HighlightUi = () => DeviceRotateHud.Instance != null ? DeviceRotateHud.Instance.ButtonsRect : null,
                      OnEnter = () => rotationBaselineY = null,
                      CheckCondition = CheckRotationDone },
 
@@ -340,28 +583,47 @@ public class TutorialManager : MonoBehaviour
             // WorldMarkerBGate — so "grab it" and "here's where to drop it" land
             // as two separate beats instead of both showing up immediately.
             new() { Text = "Placed devices can be moved too. Click and hold your PC to pick it up.",
-                     TextAfterGate = "Now drag it to the glowing spot, then click again to place it down.",
+                     TextAfterGate = "Keep holding, drag it to the glowing spot, then let go to place it down.",
                      OnEnter = () => dragBaselinePos = null,
                      CheckCondition = CheckDeviceDragged,
                      WorldMarkers = () => (FirstPlacedPcMarkerPos(), DragDestinationMarkerPos()),
                      WorldMarkerDevices = () => (firstPlacedPC, null),
-                     WorldMarkerBGate = () => DragDropManager.Instance != null && DragDropManager.Instance.IsRepositioning },
+                     MarkerAGesture = MouseGesture.Hold,
+                     MarkerBGesture = MouseGesture.Release,
+                     WorldMarkerBGate = () => DragDropManager.Instance != null && DragDropManager.Instance.IsRepositioning,
+                     // Revealed with marker B (mid-drag by definition), and follows the
+                     // PC as it's carried — so no InProgress fade on this one.
+                     Drag = () => WorldRoute(FirstPlacedPcMarkerPos, DragDestinationMarkerPos) },
 
             // 8 — Second PC
-            new() { Text = "Click <b>PC</b> again, then place a second one on the table.",
+            new() { Text = "Drag another <b>PC</b> from the sidebar onto the table.",
                      HighlightDevice = DeviceType.PC,
                      CheckCondition = () => placedPCCount >= 2,
-                     WorldMarkers = () => (PcMarkerPos(1), null) },
+                     WorldMarkers = () => (PcMarkerPos(1), null),
+                     MarkerAGesture = MouseGesture.Release,
+                     Drag = () => PaletteRoute(CompoundToolKind.PC, () => PcMarkerPos(1)) },
 
-            // 9 — Switch. No cancel step needed here: clicking the Switch button
-            // while a PC ghost is still sticky-placing switches straight to it
-            // (StartDragging cancels the stale ghost instead of no-oping) in one
-            // click, so right-click is only ever optional here, not required.
-            new() { Text = "That button now holds every device. Right-click it to flip through the others, then pick <b>Switch</b> and place one on the table too — it's what connects your PCs together.",
+            // 9 — Switch. Two-beat: first points at the arrow tab beside the
+            // button (the arrow's first appearance — every earlier step locks
+            // the button, which tucks it away), then, once the flyout is
+            // actually open, retargets the same highlight onto the Switch
+            // icon within it — see FlyoutRevealGate/FlyoutItemTarget/
+            // TextAfterFlyoutOpen. Also stays on Switch once it's become the
+            // face (picked, but the drag was dropped short of the table), so
+            // the highlight doesn't send the player back to the arrow for a
+            // tool that's already in hand.
+            new() { Text = "That button holds more than PCs. Click the <b>arrow</b> beside it to see the other tools. (Right-clicking the button works too.)",
                      HighlightDevice = DeviceType.Switch,
                      TeachDeviceFlyout = true,
                      CheckCondition = () => placedSwitchCount >= 1,
-                     WorldMarkers = () => (SwitchMarkerPos(), null) },
+                     WorldMarkers = () => (SwitchMarkerPos(), null),
+                     MarkerAGesture = MouseGesture.Release,
+                     FlyoutRevealGate = () => DevicesToolReachable(CompoundToolKind.Switch),
+                     FlyoutItemTarget = () => NetworkUIManager.Instance?.GetCompoundToolRect(CompoundToolKind.Switch),
+                     TextAfterFlyoutOpen = "Now drag <b>Switch</b> out onto the table — it's what connects your PCs together.",
+                     // The Switch button only exists on screen once the flyout is open
+                     // (or once it's become the face), so the trail waits for it by itself.
+                     Drag = () => PaletteRoute(CompoundToolKind.Switch, SwitchMarkerPos) },
 
             // 9 — Ports, pure info step.
             new() { Text = "Every device has one or more <b>ports</b> — the small connection points cables plug into. If a device has more than one, a popup will ask which one to use when you connect a cable." },
@@ -415,7 +677,9 @@ public class TutorialManager : MonoBehaviour
                                           && CableManager.Instance.PickerOpenForDevice != null
                                           && CableManager.Instance.SourceDevice != null,
                      WorldMarkers = () => (PlacedSwitchMarkerPos(), null),
-                     WorldMarkerDevices = () => (placedSwitch, null) },
+                     WorldMarkerDevices = () => (placedSwitch, null),
+                     // From whichever device the cable actually started on, to the Switch.
+                     Drag = () => WorldRoute(() => CableManager.Instance?.SourceDevice?.VisualTopPoint(), PlacedSwitchMarkerPos) },
 
             // 10e — Pick a port on the Switch, completing the cable.
             new() { Text = "Pick a free port on the Switch the same way to complete the cable.",
@@ -431,20 +695,73 @@ public class TutorialManager : MonoBehaviour
                      HighlightCable = true,
                      CheckCondition = () => cablesConnectedToSwitch >= 2,
                      WorldMarkers = () => (SecondPlacedPcMarkerPos(), PlacedSwitchMarkerPos()),
-                     WorldMarkerDevices = () => (secondPlacedPC, placedSwitch) },
+                     WorldMarkerDevices = () => (secondPlacedPC, placedSwitch),
+                     Drag = () => WorldRoute(SecondPlacedPcMarkerPos, PlacedSwitchMarkerPos) },
 
-            // 12 — Completion
-            new() { Text = "Your network is live! Nicely done.",
+            // 12 — Remove Cable. Runs once the switch-to-PCs topology actually
+            // exists (right after the second cable completes it), and reuses
+            // the remove button's own default face (Cable — see
+            // NetworkUIManager.BuildRemoveCompound) rather than teaching the
+            // flyout: this is the one removal tool reachable with a single
+            // click, no flyout required. Deliberately permissive about
+            // which cable gets clicked — there are two by this point, and
+            // either is a valid answer — so no world marker points at one.
+            new() { Text = "Your network is built! Networks change too — let's learn to undo some of it. Click <b>Remove</b>, then click one of your cables to delete it.",
+                     HighlightRemove = RemoveToolKind.Cable,
+                     OnEnter = () => cableRemovedThisStep = false,
+                     CheckCondition = () => cableRemovedThisStep },
+
+            // 13 — Remove Device, via the remove button's flyout. Same
+            // two-beat highlight pattern as the Switch step above (arrow tab,
+            // then the flyout item), just pointed at NetworkUIManager's remove
+            // compound group instead of the devices one. Permissive about
+            // which device gets removed for the same reason as step 12.
+            new() { Text = "<b>Remove</b> has an arrow too. Click the arrow to see the other removal tools.",
+                     TeachRemoveFlyout = true,
+                     OnEnter = () => deviceRemovedThisStep = false,
+                     CheckCondition = () => deviceRemovedThisStep,
+                     FlyoutRevealGate = () => RemoveToolReachable(RemoveToolKind.Device),
+                     FlyoutItemTarget = () => NetworkUIManager.Instance?.GetRemoveToolRect(RemoveToolKind.Device),
+                     TextAfterFlyoutOpen = "Click <b>Remove Device</b>, then click one of your devices to delete it." },
+
+            // 14 — Remove Table, same flyout, now reached from the Device face
+            // step 13 left behind (SelectFace swapped it when Device was
+            // picked) — so this still needs the arrow again to reopen it.
+            new() { Text = "Click the arrow beside <b>Remove</b> again to find the last tool.",
+                     TeachRemoveFlyout = true,
+                     OnEnter = () => tableRemovedThisStep = false,
+                     CheckCondition = () => tableRemovedThisStep,
+                     FlyoutRevealGate = () => RemoveToolReachable(RemoveToolKind.Table),
+                     FlyoutItemTarget = () => NetworkUIManager.Instance?.GetRemoveToolRect(RemoveToolKind.Table),
+                     TextAfterFlyoutOpen = "Click <b>Remove Table</b>, then click your table to delete it." },
+
+            // 15 — Completion
+            new() { Text = "Great work — you've learned to build a network, and take it apart when you need to.",
                      OnEnter = CompleteTutorial },
         };
     }
 
+    // FlyoutRevealGate for the flyout-teaching steps: the tool the step wants
+    // is within reach once its flyout has opened and settled, or once it's
+    // already become the button's face (picked from the flyout).
+    static bool DevicesToolReachable(CompoundToolKind tool)
+    {
+        var ui = NetworkUIManager.Instance;
+        return ui != null && (ui.IsDevicesFlyoutOpen || ui.DevicesFace == tool);
+    }
+
+    static bool RemoveToolReachable(RemoveToolKind tool)
+    {
+        var ui = NetworkUIManager.Instance;
+        return ui != null && (ui.IsRemoveFlyoutOpen || ui.RemoveFace == tool);
+    }
+
     bool CheckCameraRotated()
     {
-        if (Keyboard.current == null) return false;
-        if (Keyboard.current.qKey.wasPressedThisFrame) qPressedThisStep = true;
-        if (Keyboard.current.eKey.wasPressedThisFrame) ePressedThisStep = true;
-        return qPressedThisStep && ePressedThisStep;
+        var cam = IsometricCamera.Instance;
+        if (cam == null) return false;
+        if (yawBaseline == null) { yawBaseline = cam.TargetYaw; return false; }
+        return Mathf.Abs(cam.TargetYaw - yawBaseline.Value) >= 1f;
     }
 
     bool CheckZoomedIn()
@@ -526,6 +843,20 @@ public class TutorialManager : MonoBehaviour
     }
     Vector3? PlacedSwitchMarkerPos() => placedSwitch != null ? placedSwitch.VisualTopPoint() : null;
 
+    // ── Drag-guide routes (see TutorialStep.Drag) ────────────────────────────
+
+    // Sidebar tool → world drop spot. Fades while the player is actually
+    // dragging a fresh device out (the destination marker keeps pointing).
+    static DragGuideRoute PaletteRoute(CompoundToolKind tool, Func<Vector3?> dropSpot) => new DragGuideRoute(
+        GuideAnchor.Ui(() => NetworkUIManager.Instance != null ? NetworkUIManager.Instance.GetCompoundToolRect(tool) : null),
+        GuideAnchor.World(dropSpot),
+        inProgress: () => DragDropManager.Instance != null && DragDropManager.Instance.IsDragging);
+
+    // World spot → world spot (a device being carried, a cable's two ends).
+    // color matches the trail to its ends' markers when those are tinted.
+    static DragGuideRoute WorldRoute(Func<Vector3?> from, Func<Vector3?> to, Color? color = null) =>
+        new DragGuideRoute(GuideAnchor.World(from), GuideAnchor.World(to), color: color);
+
     // ── World-marker placement math ──────────────────────────────────────────
     // Fixed opposite corners for the table step (comfortably inside the play
     // area's ±7.5 half-extent, centered at the origin so later device markers
@@ -535,6 +866,118 @@ public class TutorialManager : MonoBehaviour
     // room to spread the two PCs apart instead of crowding the middle.
     static readonly Vector3 TableCornerA = new Vector3(-3.5f, 0f, 2.5f);
     static readonly Vector3 TableCornerB = new Vector3(3.5f, 0f, -2.5f);
+
+    // Clearance kept between the suggested second corner and the play area's
+    // edge, so its marker never sits on (or past) the border strip.
+    const float TableCornerEdgeMargin = 1f;
+
+    // The second-corner marker, placed once the first corner is fixed: the
+    // same offset from wherever that first click actually landed as
+    // TableCornerB is from TableCornerA — so a first click that missed its
+    // circle still gets a full-size table rather than a sliver (or the "Table
+    // Too Small" warning) — flipped on any axis that would run off the play
+    // area. Just TableCornerB before then (only read once the gate opens).
+    static Vector3? SecondTableCornerPos()
+    {
+        var tables = TableManager.Instance;
+        if (tables == null || !tables.HasOrigin) return TableCornerB;
+
+        Vector3 origin = tables.OriginPoint;
+        Vector3 offset = TableCornerB - TableCornerA;
+        float half = (DragDropManager.Instance != null ? DragDropManager.Instance.PlayAreaHalfExtent : 9f) - TableCornerEdgeMargin;
+
+        float x = origin.x + offset.x;
+        if (Mathf.Abs(x) > half) x = origin.x - offset.x;
+        float z = origin.z + offset.z;
+        if (Mathf.Abs(z) > half) z = origin.z - offset.z;
+        return new Vector3(x, 0f, z);
+    }
+
+    // How much bigger the resize step suggests making the table (world units):
+    // at least a clear drag, not a nudge — and further when the camera is
+    // zoomed out, so the drag stays long enough on screen for DragPathGuide to
+    // fit its chevrons between the two markers. It stops short of each world
+    // end by about ResizeTrailEndUnits and needs ResizeTrailPixels (at 1080p)
+    // in between.
+    const float MinTableGrow = 2f, MaxTableGrow = 5f;
+    const float ResizeTrailEndUnits = 1.4f;
+    const float ResizeTrailPixels = 100f;
+
+    // What the resize step's drag shouldn't run under: HUD chrome, open
+    // panels, and the callout's own home spot (see PickResizeTarget).
+    const OccupantLayer ResizeAvoidLayers = OccupantLayer.Hud | OccupantLayer.Panel | OccupantLayer.Reservation;
+    const int ResizePathSamples = 6;
+
+    // The four edge handles the resize step can suggest (see TableManager.HandlePosition).
+    static readonly Vector2Int[] TableEdgeSides =
+        { new Vector2Int(1, 0), new Vector2Int(-1, 0), new Vector2Int(0, 1), new Vector2Int(0, -1) };
+
+    // The resize step's first marker: on the tabletop, where clicking selects it.
+    Vector3? PlacedTableMarkerPos()
+    {
+        if (placedTable == null) return null;
+        Vector3 center = placedTable.FinalCenter;
+        return new Vector3(center.x, placedTable.topSurfaceY + 0.02f, center.z);
+    }
+
+    // Of the edges with room past them to grow into (clear of the play area's
+    // border, like SecondTableCornerPos), the one that moves most on screen
+    // per unit dragged from the current view — an edge dragged straight into
+    // the screen barely moves, and reads as nothing happening — and whose
+    // drag doesn't run under the callout or other UI, which would hide the
+    // destination marker and the trail. Picked once, as the drag step
+    // starts, so the spot holds still while the edge is dragged to it.
+    Vector3? PickResizeTarget()
+    {
+        resizeTarget = null;
+        if (placedTable == null) return null;
+
+        Camera cam = Camera.main;
+        resizeOccupied.Clear();
+        ScreenOccupancy.Collect(resizeOccupied, ResizeAvoidLayers);
+
+        float half = (DragDropManager.Instance != null ? DragDropManager.Instance.PlayAreaHalfExtent : 9f) - TableCornerEdgeMargin;
+        float best = -1f;
+        foreach (Vector2Int side in TableEdgeSides)
+        {
+            Vector3 edge = TableManager.HandlePosition(placedTable, side);
+            Vector3 outward = new Vector3(side.x, 0f, side.y);
+            float pxPerUnit = cam != null ? Vector2.Distance(cam.WorldToScreenPoint(edge), cam.WorldToScreenPoint(edge + outward)) : 0f;
+
+            float grow = pxPerUnit > 0f
+                ? ResizeTrailEndUnits + ResizeTrailPixels * Screen.height / 1080f / pxPerUnit
+                : MinTableGrow;
+            grow = Mathf.Clamp(Mathf.Ceil(grow * 2f) / 2f, MinTableGrow, MaxTableGrow); // half-unit steps
+
+            // Short of the border, grow only as far as there's room.
+            float room = half - (side.x != 0 ? edge.x * side.x : edge.z * side.y);
+            grow = Mathf.Min(grow, room);
+            if (grow < MinTableGrow) continue;
+
+            Vector3 target = edge + outward * grow;
+            float score = cam != null ? pxPerUnit * (1f - CoveredFraction(cam, edge, target)) : 0f;
+            if (score > best) { best = score; resizeSide = side; resizeTarget = target; }
+        }
+        return resizeTarget;
+    }
+
+    // How much of the edge → target drag (sampled along it, on screen) sits
+    // under something in resizeOccupied.
+    float CoveredFraction(Camera cam, Vector3 from, Vector3 to)
+    {
+        int covered = 0;
+        for (int i = 0; i <= ResizePathSamples; i++)
+        {
+            Vector3 sp = cam.WorldToScreenPoint(Vector3.Lerp(from, to, i / (float)ResizePathSamples));
+            foreach (var e in resizeOccupied)
+                if (e.Rect.Contains(new Vector2(sp.x, sp.y))) { covered++; break; }
+        }
+        return covered / (float)(ResizePathSamples + 1);
+    }
+
+    // The suggested edge's handle, live — the drag trail starts from it.
+    Vector3? ResizeHandlePos() =>
+        placedTable != null ? TableManager.HandlePosition(placedTable, resizeSide) : null;
 
     // The table-corner markers get a distinct color from the device-drop
     // markers (WorldPulseMarker's own warm-gold default) — a different color
@@ -583,6 +1026,12 @@ public class TutorialManager : MonoBehaviour
         placedTable = table;
     }
 
+    // Any handle counts, as long as the table came out bigger along either axis.
+    void HandleTableResized(Table table, Vector3 oldCenter, float oldWidth, float oldLength)
+    {
+        if (table.width > oldWidth + 0.01f || table.length > oldLength + 0.01f) tableGrownThisStep = true;
+    }
+
     void HandleDeviceDropped(NetworkDevice device, bool isNewDevice)
     {
         // Only a fresh palette placement counts toward "placed a PC/Switch" —
@@ -606,6 +1055,13 @@ public class TutorialManager : MonoBehaviour
         }
     }
 
+    // The removal-teaching steps run after the topology is already built and
+    // nothing later in the tutorial reads placedPCCount/firstPlacedPC/
+    // secondPlacedPC/placedSwitch again, so unlike HandleDeviceDropped this
+    // doesn't need to track WHICH device was removed — any one satisfies the
+    // step (see its Text, which says "one of your devices").
+    void HandleDeviceRemoved(NetworkDevice device) => deviceRemovedThisStep = true;
+
     void HandleCableCreated(Cable cable)
     {
         if (cable == null || !countedCables.Add(cable)) return;
@@ -618,6 +1074,15 @@ public class TutorialManager : MonoBehaviour
                            || (a.deviceType == DeviceType.Switch && b.deviceType == DeviceType.PC);
         if (isPcSwitchPair) cablesConnectedToSwitch++;
     }
+
+    // Same permissiveness as HandleDeviceRemoved — any cable satisfies the
+    // "remove a cable" step, not one specific one.
+    void HandleCableRemoved(Cable cable) => cableRemovedThisStep = true;
+
+    // Same idea, for the "remove a table" step. This level only ever has one
+    // table, but the handler stays permissive for consistency with the other
+    // two removal steps.
+    void HandleTableRemoved(Table table) => tableRemovedThisStep = true;
 
     // ── Step flow ─────────────────────────────────────────────────────────────
 
@@ -645,38 +1110,41 @@ public class TutorialManager : MonoBehaviour
 
         ApplyStepButtonLock(step);
 
-        RectTransform target = null;
-        var ui = NetworkUIManager.Instance;
-        if (ui != null)
-        {
-            if (step.HighlightDevice.HasValue) target = ui.GetDeviceButtonRect(step.HighlightDevice.Value);
-            else if (step.HighlightCable) target = ui.CableButtonRect;
-            else if (step.HighlightTable) target = ui.TableButtonRect;
-        }
+        RectTransform target = ResolveStepTarget(step);
 
         string buttonLabel = step.CheckCondition == null
             ? (stepIndex == steps.Count - 1 ? "Continue" : "Next")
             : null;
 
-        float calloutOffsetY = step.TeachDeviceFlyout ? TeachFlyoutCalloutOffsetY : 0f;
-        TutorialUIManager.Instance?.Show(step.Text, target, buttonLabel, offsetY: calloutOffsetY);
+        TutorialUIManager.Instance?.Show(step.Text, target, buttonLabel,
+            clearFlyoutBelow: step.TeachDeviceFlyout || step.TeachRemoveFlyout,
+            progress: (stepIndex + 1, steps.Count));
 
         TutorialUIManager.Instance?.HideWorldMarkers();
-        if (step.HighlightTable) TutorialUIManager.Instance?.SetMarkerColor(TableMarkerColor);
+        Color? markerColor = step.MarkerColor ?? (step.HighlightTable ? TableMarkerColor : (Color?)null);
+        if (markerColor.HasValue) TutorialUIManager.Instance?.SetMarkerColor(markerColor.Value);
         else TutorialUIManager.Instance?.ResetMarkerColors();
 
         worldMarkerBRevealed = step.WorldMarkerBGate == null;
+        // Always starts false (showing the face-button target `target` just
+        // resolved above) regardless of whether this step even has a
+        // FlyoutRevealGate — see Update()'s toggle and the field's own comment.
+        flyoutTargetRevealed = false;
 
         var markers = step.WorldMarkers?.Invoke();
         if (markers.HasValue)
         {
             var devices = step.WorldMarkerDevices?.Invoke();
-            if (markers.Value.a.HasValue) TutorialUIManager.Instance?.ShowWorldMarker(0, markers.Value.a.Value, devices?.a);
+            if (markers.Value.a.HasValue) TutorialUIManager.Instance?.ShowWorldMarker(0, markers.Value.a.Value, devices?.a, step.MarkerAGesture);
             // Marker B is held back when WorldMarkerBGate is set — Update()
             // reveals it (and swaps in TextAfterGate) once the gate fires.
             if (worldMarkerBRevealed && markers.Value.b.HasValue)
-                TutorialUIManager.Instance?.ShowWorldMarker(1, markers.Value.b.Value, devices?.b);
+                TutorialUIManager.Instance?.ShowWorldMarker(1, markers.Value.b.Value, devices?.b, step.MarkerBGesture);
         }
+
+        // Same gating as marker B — see TutorialStep.Drag/DragFromStepStart.
+        if (step.Drag != null && (worldMarkerBRevealed || step.DragFromStepStart)) TutorialUIManager.Instance?.ShowDragGuide(step.Drag());
+        else TutorialUIManager.Instance?.HideDragGuide();
     }
 
     void AdvanceStep() => EnterStep(stepIndex + 1);
@@ -692,27 +1160,39 @@ public class TutorialManager : MonoBehaviour
 
     // ── Sidebar locking ───────────────────────────────────────────────────────
     // Two layers:
-    //  1. Ping/Send Packet/Remove Cable/Remove Device are hidden outright for
-    //     the whole tutorial — the sidebar itself stays uncluttered. Router
-    //     never appears either, but it can't be hidden on its own anymore: it
-    //     now shares NetworkUIManager's single devices/cable compound button
-    //     with PC/Switch/Cable (see BuildDevicesCableCompound), so Router
-    //     simply never becomes the forced tool in any step below.
-    //  2. Of the compound button and Table — the two that DO stay visible —
-    //     only the one relevant to the CURRENT step is actually usable. The
-    //     compound button is forced to exactly one tool (its flyout disabled,
-    //     so the player can't pick anything else) rather than dimmed, since
-    //     dimming would also hide/disable the other two tools folded into it.
+    //  1. Ping/Send Packet are hidden outright for the whole tutorial — the
+    //     sidebar itself stays uncluttered. Router never appears either, but
+    //     it can't be hidden on its own anymore: it now shares
+    //     NetworkUIManager's single devices/cable compound button with
+    //     PC/Switch/Cable (see BuildDevicesCableCompound), so Router simply
+    //     never becomes the forced tool in any step below. The remove
+    //     compound button (Remove Cable/Device/Table, one button — see
+    //     BuildRemoveCompound) starts hidden the same way, but isn't
+    //     permanent: the "remove a cable" step (run once the switch-to-PCs
+    //     topology is built) reveals it (see ApplyStepButtonLock/
+    //     removeRevealed) and it stays visible from then on, same as Table
+    //     below.
+    //  2. Of the buttons that DO stay visible once revealed (compound
+    //     devices/cable, Table, compound remove) — only the one relevant to
+    //     the CURRENT step is actually usable. Each compound button is
+    //     forced to exactly one tool (its flyout disabled, so the player
+    //     can't pick anything else) rather than dimmed, since dimming would
+    //     also hide/disable the other tools folded into it.
 
     void HideUnneededButtons()
     {
+        // Ctrl+Z is a tool too — see UndoManager.AvailableInThisLevel.
+        if (UndoManager.Instance != null) UndoManager.Instance.AvailableInThisLevel = false;
+
         var ui = NetworkUIManager.Instance;
         if (ui == null) return;
 
         SidebarButtonLock.SetActive(ui.PingButton, false);
         SidebarButtonLock.SetActive(ui.SendPacketButton, false);
-        SidebarButtonLock.SetActive(ui.RemoveCableButton, false);
-        SidebarButtonLock.SetActive(ui.RemoveDeviceButton, false);
+        SidebarButtonLock.SetActive(ui.RemoveDeviceButton, false); // same physical button as RemoveCableButton/RemoveTableButton (removeGroup) — revealed later by the "remove a cable" step
+        // The flyout arrows first appear on the steps that teach them, not
+        // with the HUD — see ApplyStepButtonLock and the NetworkUIManager doc.
+        ui.DisableCompoundFlyouts();
     }
 
     static CompoundToolKind? DeriveCompoundTool(TutorialStep step)
@@ -731,6 +1211,20 @@ public class TutorialManager : MonoBehaviour
         if (step.TeachDeviceFlyout) ui.SetCompoundToolUnrestricted();
         else ui.SetCompoundToolLock(DeriveCompoundTool(step));
         SidebarButtonLock.SetLocked(ui.TableButton, !step.HighlightTable);
+
+        // Remove starts hidden (see HideUnneededButtons) and stays that way
+        // until the step that teaches it — from then on it stays visible for
+        // the rest of the tutorial, same as Table, just locked/unlocked per
+        // step like every other tool. TeachRemoveFlyout mirrors
+        // TeachDeviceFlyout above: leaves the flyout reachable (Device/Table)
+        // instead of forcing one tool directly.
+        if (step.HighlightRemove.HasValue || step.TeachRemoveFlyout) removeRevealed = true;
+        if (removeRevealed)
+        {
+            SidebarButtonLock.SetActive(ui.RemoveDeviceButton, true);
+            if (step.TeachRemoveFlyout) ui.SetRemoveToolUnrestricted();
+            else ui.SetRemoveToolLock(step.HighlightRemove);
+        }
     }
 
     // Small pause between the final step's "network is live" message and the
@@ -773,8 +1267,7 @@ public class TutorialManager : MonoBehaviour
             "Back to Level Select",
             () =>
             {
-                MainMenuBootstrap.OpenLevelSelectOnLoad = true;
-                LoadingScreenManager.LoadScene("MainMenu", "LOADING LEVEL SELECT");
+                LoadingScreenManager.ExitToLevelSelect();
             },
             TaskManager.Instance != null ? TaskManager.Instance.ComputeStars() : 3);
     }

@@ -25,6 +25,12 @@ public class UIIconImporter : AssetPostprocessor
         importer.alphaIsTransparency = true;
         importer.textureCompression = TextureImporterCompression.CompressedHQ;
         importer.spritePixelsPerUnit = 100;
+        // Lets SpriteContentBounds read each icon's alpha channel at runtime to
+        // find the actual visible artwork's bounding box (these PNGs bake in a
+        // transparent margin around the plate) — used to size click-glow FX to
+        // the button's real silhouette instead of the full padded canvas. Small
+        // UI textures, so the extra CPU-side memory is negligible.
+        importer.isReadable          = true;
 
         var settings = new TextureImporterSettings();
         importer.ReadTextureSettings(settings);

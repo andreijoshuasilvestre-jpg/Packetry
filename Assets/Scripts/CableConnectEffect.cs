@@ -28,7 +28,7 @@ public static class CableConnectEffect
     {
         if (device == null) return;
 
-        PacketDeviceEffect.Play(device, GlowTint, BounceIntensity);
+        PacketDeviceEffect.Play(device, GlowTint, BounceIntensity, AnimationKind.Build);
 
         var renderers = device.GetComponentsInChildren<Renderer>();
         if (renderers.Length == 0) return;

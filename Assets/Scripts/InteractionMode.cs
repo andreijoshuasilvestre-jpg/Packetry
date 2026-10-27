@@ -9,6 +9,15 @@
 /// </summary>
 public static class InteractionMode
 {
+    /// <summary>True while an overlay that owns all input sits over the level — the
+    /// Settings dialog, or an annotation waiting on its own button (see
+    /// AnnotationLock). Every interactive manager's Update() stands down while it's
+    /// true, so a new blocking overlay is added here once rather than to each of
+    /// them.</summary>
+    public static bool IsSuspended =>
+        (SettingsPanelManager.Instance != null && SettingsPanelManager.Instance.IsOpen) ||
+        AnnotationLock.IsActive;
+
     public static void CancelOthers(object activating)
     {
         if (activating != CableManager.Instance &&
@@ -34,6 +43,10 @@ public static class InteractionMode
         if (activating != TableManager.Instance &&
             TableManager.Instance != null && TableManager.Instance.IsDragging)
             TableManager.Instance.CancelDragging();
+
+        if (activating != TableManager.Instance &&
+            TableManager.Instance != null && TableManager.Instance.IsResizing)
+            TableManager.Instance.CancelResizing();
 
         if (activating != PingToolManager.Instance &&
             PingToolManager.Instance != null && PingToolManager.Instance.IsPinging)

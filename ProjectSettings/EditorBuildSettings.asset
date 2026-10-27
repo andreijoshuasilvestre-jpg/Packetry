@@ -17,5 +17,8 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/Scenes/LevelTemplates/Level4_Template.unity
     guid: 9c52e1f4287e1254cb65f3302b331e51
+  - enabled: 1
+    path: Assets/Scenes/LevelTemplates/Level7_Template.unity
+    guid: dab84e5683dee414c98ac6eb4260911f
   m_configObjects:
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}

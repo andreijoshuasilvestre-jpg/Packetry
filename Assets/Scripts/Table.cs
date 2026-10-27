@@ -5,9 +5,11 @@ using UnityEngine;
 /// <summary>
 /// Static tabletop surface. Devices whose NetworkDevice.requiresTable is true
 /// may only be dropped inside a table's XZ footprint (see DragDropManager.Drop()).
-/// Placed directly by TableManager — position and footprint are fixed at creation
-/// from the two grid corners the player clicked; there is no drag/physics step
-/// like devices go through.
+/// Placed directly by TableManager — position and footprint come from the two
+/// grid corners the player clicked; there is no drag/physics step like devices
+/// go through. Both can change later: TableManager moves a selected table, and
+/// resizes it from the handles on its corners and edges (geometry re-fit by
+/// DeviceModelBuilder.ResizeTable).
 /// </summary>
 public class Table : MonoBehaviour
 {
@@ -99,6 +101,31 @@ public class Table : MonoBehaviour
         return false;
     }
 
+    // True if a rectangular footprint centered at `center` with the given
+    // width/length would cover any currently-placed device's position —
+    // stops a table being placed (or dragged) on top of a device that isn't
+    // resting on this table itself. Devices normally can only ever exist
+    // inside SOME table's footprint (NetworkDevice.requiresTable — see
+    // DragDropManager.Drop), so in practice this only ever bites a device
+    // left stranded on the ground by TableRemoverManager's drop-physics
+    // after its table was deleted. `excludeDevices` lets TableManager skip
+    // the devices riding along with a table currently being dragged, since
+    // those are expected to stay covered by their own table's footprint.
+    public static bool WouldCoverDevice(Vector3 center, float width, float length, IList<NetworkDevice> excludeDevices = null)
+    {
+        float halfW = width * 0.5f, halfL = length * 0.5f;
+        foreach (var device in Object.FindObjectsByType<NetworkDevice>(FindObjectsInactive.Exclude))
+        {
+            if (device.isPaletteItem) continue;
+            if (excludeDevices != null && excludeDevices.Contains(device)) continue;
+
+            Vector3 p = device.transform.position;
+            if (Mathf.Abs(p.x - center.x) <= halfW && Mathf.Abs(p.z - center.z) <= halfL)
+                return true;
+        }
+        return false;
+    }
+
     // Highest tabletop surface any table occupies at this XZ position, or 0 if
     // none — used by Cable to keep its sag from dipping through a table it
     // passes over. Takes the max in case footprints overlap.
@@ -140,14 +167,20 @@ public class Table : MonoBehaviour
         StartCoroutine(BuildAnimationRoutine(originPoint));
     }
 
+    /// <summary>True while PlayBuildAnimation's axis-grow still owns this
+    /// table's transform — TableManager won't start a resize until it's done.</summary>
+    public bool IsBuilding { get; private set; }
+
     IEnumerator BuildAnimationRoutine(Vector3 originPoint)
     {
+        IsBuilding = true;
         Vector3 target = transform.localScale; // normally Vector3.one
         transform.localScale = new Vector3(MinAxisScale, target.y, MinAxisScale); // height fixed, no vertical animation
         transform.position   = new Vector3(originPoint.x, finalCenter.y, originPoint.z);
 
         yield return AnimateAxis(0, target.x, originPoint.x, finalCenter.x); // width  — grows from the clicked corner
         yield return AnimateAxis(2, target.z, originPoint.z, finalCenter.z); // length — grows from the clicked corner
+        IsBuilding = false;
     }
 
     IEnumerator AnimateAxis(int axis, float targetScale, float originCoord, float finalCoord)
@@ -155,7 +188,9 @@ public class Table : MonoBehaviour
         float elapsed = 0f;
         while (elapsed < AxisAnimDuration)
         {
-            elapsed += Time.deltaTime;
+            // Same Build speed as the blueprint reveal played alongside it
+            // (see TableManager.FinishPlacement), so the two stay in step.
+            elapsed += AnimationSpeed.Delta(AnimationKind.Build);
             float t = Mathf.Clamp01(elapsed / AxisAnimDuration);
             float eased = 1f - (1f - t) * (1f - t); // ease-out (quadratic)
             SetAxis(axis, Mathf.Lerp(MinAxisScale, targetScale, eased));

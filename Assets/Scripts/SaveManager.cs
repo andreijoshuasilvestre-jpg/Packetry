@@ -100,16 +100,22 @@ public static class SaveManager
         Save();
     }
 
-    /// <summary>1-3, from TaskManager.ComputeStars() at the moment this level was last
-    /// completed; 0 if never completed. Not touched by ClearLevelProgress — a
-    /// replay keeps showing the previously-earned rating until it's completed
-    /// again, same as completionStatus itself.</summary>
+    /// <summary>Highest rating TaskManager.ComputeStars() can award a single level.</summary>
+    public const int MaxStarsPerLevel = 3;
+
+    /// <summary>1-3, the best TaskManager.ComputeStars() rating this level has ever
+    /// been completed with; 0 if never completed. Not touched by ClearLevelProgress —
+    /// a replay keeps showing the previously-earned rating, same as completionStatus
+    /// itself.</summary>
     public static int GetStars(int levelId) =>
         Current.levels.FirstOrDefault(l => l.levelId == levelId)?.starsEarned ?? 0;
 
+    /// <summary>Records a completion's rating, keeping the level's best — a replay
+    /// can raise it (2 → 3 counts as 3, never 5) but a worse replay never lowers it.</summary>
     public static void SetStars(int levelId, int stars)
     {
-        GetOrCreate(levelId).starsEarned = stars;
+        var progress = GetOrCreate(levelId);
+        progress.starsEarned = Mathf.Max(progress.starsEarned, Mathf.Clamp(stars, 0, MaxStarsPerLevel));
         Save();
     }
 
@@ -133,12 +139,28 @@ public static class SaveManager
         return progress != null && progress.topology != null && progress.topology.devices.Count > 0;
     }
 
+    /// <summary>True when this level's saved snapshot is a finished run — every saved
+    /// task complete (the completion-time save, see e.g. Level2Guide.HandleTasksChanged).
+    /// A guided level has nothing left to resume in one, so GameBootstrap starts a
+    /// replay from its default content instead; a challenge level restores the
+    /// finished build (see GameBootstrap.SetupLevelContent, IKeepsFinishedBuild).</summary>
+    public static bool IsRunFinished(int levelId)
+    {
+        var progress = Current.levels.FirstOrDefault(l => l.levelId == levelId);
+        return progress?.tasks != null && progress.tasks.Count > 0 && progress.tasks.All(t => t.status);
+    }
+
     // ── Settings (global, not per-level) ────────────────────────────────────
 
     /// <summary>Old save.json files predate SettingsData — JsonUtility leaves the
     /// field at its own `= new SettingsData()` initializer in that case, but guard
     /// anyway in case a save was ever hand-edited/corrupted to null it out.</summary>
     public static SettingsData Settings => Current.settings ??= new SettingsData();
+
+    /// <summary>Raised whenever the subnet palette changes (a slot recolored, added
+    /// or removed) — GameBootstrap listens so a level already on screen repaints
+    /// its devices/cables/background immediately rather than on the next load.</summary>
+    public static event Action SubnetColorsChanged;
 
     /// <summary>Player-chosen color for a subnet-palette slot, or null if that slot
     /// still uses GameTheme's auto-generated default.</summary>
@@ -151,6 +173,7 @@ public static class SaveManager
         if (existing != null) existing.colorHex = colorHex;
         else Settings.subnetColorOverrides.Add(new SubnetColorOverride { slotIndex = slotIndex, colorHex = colorHex });
         Save();
+        SubnetColorsChanged?.Invoke();
     }
 
     /// <summary>Adds one more customizable slot (the carousel's '+' button) and
@@ -159,7 +182,20 @@ public static class SaveManager
     {
         Settings.subnetColorSlotCount++;
         Save();
+        SubnetColorsChanged?.Invoke();
         return Settings.subnetColorSlotCount - 1;
+    }
+
+    /// <summary>Removes the last customizable slot (the carousel's '−' button),
+    /// dropping its color override too so re-adding it later starts from the
+    /// default color again. Never goes below one slot.</summary>
+    public static void RemoveSubnetColorSlot()
+    {
+        if (Settings.subnetColorSlotCount <= 1) return;
+        Settings.subnetColorSlotCount--;
+        Settings.subnetColorOverrides.RemoveAll(o => o.slotIndex >= Settings.subnetColorSlotCount);
+        Save();
+        SubnetColorsChanged?.Invoke();
     }
 
     /// <summary>Wipes this level's saved topology/task snapshot (but keeps

@@ -33,9 +33,23 @@ public class PingCheckmarkEffect : MonoBehaviour
     const float BobSpeed      = 3f;
     const float GlowMultiplier = HologramMaterial.GlowMultiplier; // same bloom calibration every glowing effect in this project shares
 
-    /// <param name="icon">Which glyph to pop in — defaults to CheckmarkIconBuilder's
-    /// tick (the success case) when left null; pass CrossIconBuilder's X for a
-    /// failed ping.</param>
+    // The tick/cross pop in right where PingSelectBadge's radial was (it's
+    // removed as the result lands), so they're drawn on a grid whose cells
+    // are the same world size as the radial's — the same pixel art handing
+    // off, rather than the result arriving visibly chunkier than the badge.
+    static readonly int GlyphCells = Mathf.RoundToInt(IconSize / PingSelectBadge.CellWorldSize);
+    const int GlyphStroke = 3;
+
+    /// <summary>Success tick at the badge's pixel density — the default glyph.</summary>
+    public static Sprite SuccessGlyph =>
+        CheckmarkIconBuilder.GetSprite(Color.white, GlyphCells, GlyphStroke, PingSelectBadge.PixelScale);
+
+    /// <summary>Failure cross at the badge's pixel density — pass as <c>icon</c> for a failed ping.</summary>
+    public static Sprite FailureGlyph =>
+        CrossIconBuilder.GetSprite(Color.white, GlyphCells, GlyphStroke, PingSelectBadge.PixelScale);
+
+    /// <param name="icon">Which glyph to pop in — defaults to SuccessGlyph
+    /// (the tick) when left null; pass FailureGlyph for a failed ping.</param>
     public static void Play(NetworkDevice device, Color color, Sprite icon = null)
     {
         if (device == null) return;
@@ -54,7 +68,7 @@ public class PingCheckmarkEffect : MonoBehaviour
 
         var renderer = quadGo.GetComponent<Renderer>();
         Shader shader = Shader.Find("Sprites/Default");
-        Sprite glyph = icon != null ? icon : CheckmarkIconBuilder.GetSprite(Color.white);
+        Sprite glyph = icon != null ? icon : SuccessGlyph;
         var material = new Material(shader) { mainTexture = glyph.texture };
         renderer.sharedMaterial = material;
         renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
@@ -73,7 +87,7 @@ public class PingCheckmarkEffect : MonoBehaviour
         float t = 0f;
         while (t < PopInDuration)
         {
-            t += Time.deltaTime;
+            t += AnimationSpeed.Delta(AnimationKind.Packets);
             float p = EaseOutBack(Mathf.Clamp01(t / PopInDuration));
             quad.localScale = Vector3.one * IconSize * Mathf.Max(p, 0f);
             Billboard(quad, ref cam);
@@ -85,7 +99,7 @@ public class PingCheckmarkEffect : MonoBehaviour
         float held = 0f;
         while (held < HoldDuration)
         {
-            held += Time.deltaTime;
+            held += AnimationSpeed.Delta(AnimationKind.Packets);
             quad.position = basePos + Vector3.up * Mathf.Sin(held * BobSpeed) * BobAmplitude;
             Billboard(quad, ref cam);
             yield return null;
@@ -94,7 +108,7 @@ public class PingCheckmarkEffect : MonoBehaviour
         t = 0f;
         while (t < FadeDuration)
         {
-            t += Time.deltaTime;
+            t += AnimationSpeed.Delta(AnimationKind.Packets);
             float alpha = 1f - Mathf.Clamp01(t / FadeDuration);
             Billboard(quad, ref cam);
             SetTint(renderer, block, color, alpha);

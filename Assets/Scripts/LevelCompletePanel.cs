@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
@@ -47,13 +48,29 @@ public class LevelCompletePanel : MonoBehaviour
     const int PanelChamfer         = 22;
     const int PanelPixelScale      = 4;
 
-    // Clears NetworkUIManager's StatusBar (bottom, full-width, 32px) with
-    // room to spare, and sits in the one HUD corner nothing else claims —
-    // TaskUIManager owns top-right, NetworkUIManager's sidebar owns left.
-    const float FloatingBackBottomMargin = 44f;
+    // Bottom-center, stacked just above DeviceRotateHud's slot (same baseline
+    // and button height as ViewControlsHud) so the two never cover each other
+    // when a device gets selected while looking around. The bottom-right
+    // corner is ViewControlsHud's, with toasts and the diagram window stacked
+    // above it; TaskUIManager owns top-right, NetworkUIManager's sidebar left.
+    static float FloatingBackBottom => ViewControlsHud.Margin + HudIconButton.Size + 12f;
 
-    static readonly Color StarFilledColor = GameTheme.Warning;
-    static readonly Color StarEmptyColor  = new Color(0.35f, 0.36f, 0.40f, 1f);
+    static readonly Color StarFilledColor = StarIconBuilder.EarnedColor;
+    static readonly Color StarEmptyColor  = StarIconBuilder.UnearnedColor;
+
+    // Panel entrance/exit — reuses ZoomPanel (already LevelSelectManager's
+    // scale-from-0 pop for its own panel) rather than a bespoke coroutine
+    // here, so "pop up" / "disappear" mean the exact same animation language
+    // across both screens.
+    const float StarRevealStartDelay = 0.35f; // roughly ZoomPanel's own duration — first star waits for the panel's own pop to settle before celebrating
+    const float StarStaggerGap       = 0.18f; // gap between one star finishing its pop and the next one starting
+    const float StarPopDuration      = 0.32f;
+    const float StarMinPopScale      = 0.2f;
+    const float StarGlowPeak         = 0.85f;
+    const float StarGlowPunch        = 1.6f;
+    const float StarSize    = StarIconBuilder.DisplaySize; // whole multiple of the star's pixel grid, so every star pixel is an even block
+    const float StarSpacing = 8f;
+    static readonly Vector2 StarGlowSize = new Vector2(96f, 96f); // ~2.5x the star icon — same "glow bleeds past the shape" ratio MenuButtonFX/PanelRevealFX use
 
     TMP_FontAsset font;
     Sprite actionNormalSprite;
@@ -63,13 +80,28 @@ public class LevelCompletePanel : MonoBehaviour
 
     GameObject dimRoot;
     GameObject panelRoot;
+    ZoomPanel panelZoom;
+    RectTransform sparkParent;
+    Camera eventCamera;
     TextMeshProUGUI titleLabel;
     TextMeshProUGUI bodyLabel;
     TextMeshProUGUI continueButtonLabel;
     GameObject floatingBackButtonGo;
     GameObject starsRow;
-    Image[] starImages;
+    StarSlot[] starSlots;
+    Coroutine starRevealRoutine;
+    Coroutine pendingShow;
     Action onContinue;
+
+    // One star's icon (the sprite that swaps empty->filled) plus its own
+    // behind-the-icon glow (see BuildStarsRow) — grouped so PopStar can
+    // animate both together without threading two parallel arrays around.
+    struct StarSlot
+    {
+        public RectTransform Rt;
+        public Image Icon;
+        public Image Glow;
+    }
 
     void Awake()
     {
@@ -93,27 +125,109 @@ public class LevelCompletePanel : MonoBehaviour
     // at the moment the level completed), or -1 (default) to hide the row
     // entirely — the sentinel keeps this call backward-compatible with any
     // future non-completion caller that has no star rating to report.
+    //
+    // Holds off while NetworkActivity says packets or pings are still
+    // traveling or landing — a level usually completes the instant its last
+    // packet is delivered, and popping the modal right then covered the very
+    // delivery the player had just earned it with. Shows straight away (same
+    // frame) when nothing is in flight. Callers already save progress before
+    // calling this, so only the modal itself is deferred.
     public void Show(string title, string body, string continueButtonText, Action onContinueClicked, int stars = -1)
+    {
+        if (pendingShow != null) StopCoroutine(pendingShow);
+        pendingShow = StartCoroutine(ShowWhenNetworkSettles(title, body, continueButtonText, onContinueClicked, stars));
+    }
+
+    IEnumerator ShowWhenNetworkSettles(string title, string body, string continueButtonText, Action onContinueClicked, int stars)
+    {
+        while (NetworkActivity.IsBusy) yield return null;
+        pendingShow = null;
+        ShowNow(title, body, continueButtonText, onContinueClicked, stars);
+    }
+
+    void ShowNow(string title, string body, string continueButtonText, Action onContinueClicked, int stars)
     {
         titleLabel.text          = title;
         bodyLabel.text           = body;
         continueButtonLabel.text = continueButtonText;
         onContinue                = onContinueClicked;
-        SetStars(stars);
 
         // Reset any "View Topology" peek state left over from a previous
         // call — Show() always starts a fresh completion flow.
         floatingBackButtonGo.SetActive(false);
         dimRoot.SetActive(true);
+        panelZoom.ZoomIn();
+        SetStars(stars);
     }
 
+    // Snaps every star to its empty sprite synchronously (so nothing flashes
+    // full-bright before its own turn), then staggers the earned ones in one
+    // at a time via PopStar — see RevealStarsRoutine.
     void SetStars(int stars)
     {
         starsRow.SetActive(stars >= 0);
-        if (stars < 0) return;
+        if (starRevealRoutine != null) { StopCoroutine(starRevealRoutine); starRevealRoutine = null; }
 
-        for (int i = 0; i < starImages.Length; i++)
-            starImages[i].sprite = i < stars ? starFilledSprite : starEmptySprite;
+        for (int i = 0; i < starSlots.Length; i++)
+        {
+            starSlots[i].Icon.sprite = starEmptySprite;
+            starSlots[i].Icon.rectTransform.localScale = Vector3.one;
+            starSlots[i].Glow.color = new Color(StarFilledColor.r, StarFilledColor.g, StarFilledColor.b, 0f);
+        }
+        if (stars <= 0) return;
+
+        starRevealRoutine = StartCoroutine(RevealStarsRoutine(stars));
+    }
+
+    IEnumerator RevealStarsRoutine(int stars)
+    {
+        yield return new WaitForSecondsRealtime(StarRevealStartDelay);
+
+        for (int i = 0; i < stars && i < starSlots.Length; i++)
+        {
+            yield return PopStar(starSlots[i]);
+            yield return new WaitForSecondsRealtime(StarStaggerGap);
+        }
+        starRevealRoutine = null;
+    }
+
+    // One star's reveal: swap to the filled sprite, punch-scale it in from
+    // StarMinPopScale with an ease-out-back overshoot (the same "pop" feel as
+    // PingCheckmarkEffect's own icon reveal), and fire a glow flash + UI spark
+    // burst in step with it — the exact glow+particle language MenuButtonFX
+    // uses for a button click, just replayed per star instead of per press.
+    IEnumerator PopStar(StarSlot slot)
+    {
+        slot.Icon.sprite = starFilledSprite;
+        slot.Icon.rectTransform.localScale = Vector3.one * StarMinPopScale;
+        AudioManager.Instance?.PlaySfx(SfxId.StarAppear);
+
+        if (sparkParent != null)
+            UISparks.EmitBurst(slot.Rt, sparkParent, eventCamera, StarFilledColor);
+
+        float t = 0f;
+        while (t < StarPopDuration)
+        {
+            t += Time.unscaledDeltaTime;
+            float p = Mathf.Clamp01(t / StarPopDuration);
+            slot.Icon.rectTransform.localScale = Vector3.one * Mathf.LerpUnclamped(StarMinPopScale, 1f, EaseOutBack(p));
+
+            float glowFlash = Mathf.Sin(p * Mathf.PI); // 0 -> 1 -> 0, front-loaded flash rather than a glow that tracks the whole pop
+            slot.Glow.color = new Color(StarFilledColor.r, StarFilledColor.g, StarFilledColor.b, glowFlash * StarGlowPeak);
+            slot.Glow.rectTransform.localScale = Vector3.one * (1f + glowFlash * (StarGlowPunch - 1f));
+
+            yield return null;
+        }
+        slot.Icon.rectTransform.localScale = Vector3.one;
+        slot.Glow.color = new Color(StarFilledColor.r, StarFilledColor.g, StarFilledColor.b, 0f);
+        slot.Glow.rectTransform.localScale = Vector3.one;
+    }
+
+    static float EaseOutBack(float x)
+    {
+        const float c1 = 1.70158f;
+        const float c3 = c1 + 1f;
+        return 1f + c3 * Mathf.Pow(x - 1f, 3f) + c1 * Mathf.Pow(x - 1f, 2f);
     }
 
     public void Hide()
@@ -126,13 +240,36 @@ public class LevelCompletePanel : MonoBehaviour
         if (dimRoot != null) dimRoot.SetActive(false);
     }
 
+    // Zooms the panel back out to 0 (mirrors Show()'s zoom-in) before actually
+    // hiding the modal root and handing off to onComplete — so both ways the
+    // modal can end (View Topology / Continue) read as the panel shrinking
+    // away, not just vanishing.
+    // The floating back button also lands here after View Topology has
+    // already hidden the modal — ZoomOut's coroutine can't start on the
+    // inactive panel, so onComplete would silently never fire. Nothing is
+    // on screen to animate then anyway, so skip straight to it.
+    void HideAnimated(Action onComplete)
+    {
+        if (!panelRoot.activeInHierarchy)
+        {
+            Hide();
+            onComplete?.Invoke();
+            return;
+        }
+
+        panelZoom.ZoomOut(() =>
+        {
+            Hide();
+            onComplete?.Invoke();
+        });
+    }
+
     // Lets the player dismiss the modal and look at the network they just
     // built without losing the way back — the floating button picks up the
     // exact same "go to Level Select" action the modal's own button has.
     void OnViewTopologyClicked()
     {
-        Hide();
-        floatingBackButtonGo.SetActive(true);
+        HideAnimated(() => floatingBackButtonGo.SetActive(true));
     }
 
     void OnContinueClicked()
@@ -140,8 +277,7 @@ public class LevelCompletePanel : MonoBehaviour
         floatingBackButtonGo.SetActive(false);
         var callback = onContinue;
         onContinue = null;
-        Hide();
-        callback?.Invoke();
+        HideAnimated(() => callback?.Invoke());
     }
 
     // ── UI construction ──────────────────────────────────────────────────────
@@ -153,6 +289,13 @@ public class LevelCompletePanel : MonoBehaviour
         var canvas = canvasGo.AddComponent<Canvas>();
         canvas.renderMode   = RenderMode.ScreenSpaceOverlay;
         canvas.sortingOrder = 50; // above every other in-scene canvas, including TutorialUIManager's
+
+        // Same origin/camera UISparks.EmitBurst needs everywhere else it's
+        // used (see MenuButtonFX.Init) — worldCamera is null for this Screen
+        // Space Overlay canvas, which is exactly what the overlay-mode
+        // ScreenPointToLocalPointInRectangle conversion expects.
+        sparkParent = canvasGo.transform as RectTransform;
+        eventCamera = canvas.worldCamera;
 
         var scaler = canvasGo.AddComponent<CanvasScaler>();
         scaler.uiScaleMode         = CanvasScaler.ScaleMode.ScaleWithScreenSize;
@@ -192,19 +335,25 @@ public class LevelCompletePanel : MonoBehaviour
         // that much room — see the offsets' comment for why 336 overlapped.)
         rt.sizeDelta = new Vector2(560f, 380f);
 
+        // Scale-from-0 pop / shrink-to-0 dismiss (see Show/HideAnimated) —
+        // same component LevelSelectManager's own panel already uses.
+        panelZoom = panelRoot.AddComponent<ZoomPanel>();
+        panelZoom.PromptSfx = SfxId.LevelCompletePrompt;
+
         BuildStarsRow(panelRoot.transform);
 
-        // Stacked top-down by hand (stars bottom -44 -> title -56..-100 ->
-        // body -108..-276), each with a small gap from the one above, ending
-        // well clear of the button row's top edge (~-102 at this panel
-        // height) — the previous offsets here (title -50, body +10) were
-        // never recomputed when the stars row was added and actually
-        // overlapped (body's own anchored Y put it partly *above* the
-        // panel's top edge).
-        titleLabel = MakeLabel(panelRoot.transform, "Title", 32, FontStyles.Bold, new Vector2(0f, -56f), new Vector2(480f, 44f));
+        // Stacked top-down by hand (stars -20..-59 -> title -66..-110 ->
+        // body -118..-266), each with a small gap from the one above, ending
+        // well clear of the button row's top edge (-292 at this panel
+        // height: 52px buttons sitting 36px up from the bottom) — the
+        // previous offsets here (title -50, body +10) were never recomputed
+        // when the stars row was added and actually overlapped (body's own
+        // anchored Y put it partly *above* the panel's top edge). Shifted
+        // down 10px when the stars grew from 28px to the pixel-grid-exact 39px.
+        titleLabel = MakeLabel(panelRoot.transform, "Title", 32, FontStyles.Bold, new Vector2(0f, -66f), new Vector2(480f, 44f));
         titleLabel.color = Color.white;
 
-        bodyLabel = MakeLabel(panelRoot.transform, "Body", 20, FontStyles.Normal, new Vector2(0f, -108f), new Vector2(480f, 148f));
+        bodyLabel = MakeLabel(panelRoot.transform, "Body", 20, FontStyles.Normal, new Vector2(0f, -118f), new Vector2(480f, 148f));
         bodyLabel.color = new Color(0.85f, 0.90f, 0.97f);
 
         // Two buttons side by side — "View Topology" (secondary, dismiss-only)
@@ -212,8 +361,12 @@ public class LevelCompletePanel : MonoBehaviour
         MakeButton(panelRoot.transform, "ViewTopologyButton", GameTheme.Info,
             new Vector2(-135f, 36f), "View Topology", OnViewTopologyClicked, out _);
 
+        // Idle pulse on the primary action only — the one button every
+        // player needs to notice and press to move on, not the secondary
+        // View Topology dismiss.
         MakeButton(panelRoot.transform, "ContinueButton", GameTheme.ElectricBlue,
-            new Vector2(135f, 36f), "Continue", OnContinueClicked, out continueButtonLabel);
+            new Vector2(135f, 36f), "Continue", OnContinueClicked, out continueButtonLabel,
+            idlePulse: true);
 
         BuildFloatingBackButton(canvasGo.transform);
     }
@@ -230,8 +383,8 @@ public class LevelCompletePanel : MonoBehaviour
         rowRt.anchorMin        = new Vector2(0.5f, 1f);
         rowRt.anchorMax        = new Vector2(0.5f, 1f);
         rowRt.pivot            = new Vector2(0.5f, 1f);
-        rowRt.anchoredPosition = new Vector2(0f, -14f);
-        rowRt.sizeDelta        = new Vector2(120f, 28f);
+        rowRt.anchoredPosition = new Vector2(0f, -20f); // clears the plate's 16px border (4 cells x pixelScale 4)
+        rowRt.sizeDelta        = new Vector2(3 * StarSize + 2 * StarSpacing, StarSize);
 
         var layout = starsRow.AddComponent<HorizontalLayoutGroup>();
         layout.childAlignment        = TextAnchor.MiddleCenter;
@@ -243,32 +396,59 @@ public class LevelCompletePanel : MonoBehaviour
         layout.childControlHeight    = true;
         layout.childForceExpandWidth = false;
         layout.childForceExpandHeight = false;
-        layout.spacing               = 8f;
+        layout.spacing               = StarSpacing;
 
-        starImages = new Image[3];
+        starSlots = new StarSlot[3];
         for (int i = 0; i < 3; i++)
         {
-            var go = new GameObject($"Star{i}");
+            var go = new GameObject($"Star{i}", typeof(RectTransform));
             go.transform.SetParent(starsRow.transform, false);
-            var img = go.AddComponent<Image>();
-            img.sprite = starEmptySprite;
             var le = go.AddComponent<LayoutElement>();
-            le.preferredWidth  = 28f;
-            le.preferredHeight = 28f;
-            starImages[i] = img;
+            le.preferredWidth  = StarSize;
+            le.preferredHeight = StarSize;
+
+            // Glow built (and thus drawn) BEFORE Icon so it sits behind the
+            // star sprite, not on top of it — same ordering MenuButtonFX's
+            // Glow/Visual split relies on. Additive + oversized relative to
+            // the icon so PopStar's flash reads as light spilling out
+            // from the star rather than a bright disc printed over it.
+            var glowGo = new GameObject("Glow", typeof(RectTransform));
+            glowGo.transform.SetParent(go.transform, false);
+            var glowImg = glowGo.AddComponent<Image>();
+            glowImg.sprite         = RadialGlowSprite.Get();
+            glowImg.material       = RadialGlowSprite.GetAdditiveMaterial();
+            glowImg.raycastTarget  = false;
+            glowImg.color          = new Color(StarFilledColor.r, StarFilledColor.g, StarFilledColor.b, 0f);
+            var grt = glowGo.GetComponent<RectTransform>();
+            grt.anchorMin = grt.anchorMax = grt.pivot = new Vector2(0.5f, 0.5f);
+            grt.sizeDelta = StarGlowSize;
+
+            var iconGo = new GameObject("Icon", typeof(RectTransform));
+            iconGo.transform.SetParent(go.transform, false);
+            var iconImg = iconGo.AddComponent<Image>();
+            iconImg.sprite = starEmptySprite;
+            var irt = iconGo.GetComponent<RectTransform>();
+            irt.anchorMin = Vector2.zero;
+            irt.anchorMax = Vector2.one;
+            irt.offsetMin = Vector2.zero;
+            irt.offsetMax = Vector2.zero;
+
+            starSlots[i] = new StarSlot { Rt = go.GetComponent<RectTransform>(), Icon = iconImg, Glow = glowImg };
         }
     }
 
-    // Small pill button, bottom-right of the whole screen (clear of
-    // TaskUIManager's top-right panel and NetworkUIManager's status bar),
-    // that only appears once "View Topology" has dismissed the modal —
-    // reuses the exact same Continue action so there's always a way back
-    // to Level Select.
+    // Small pill button, bottom-center of the whole screen (see
+    // FloatingBackBottom for what it stays clear of), that only appears once
+    // "View Topology" has dismissed the modal — reuses the exact same
+    // Continue action so there's always a way back to Level Select.
+    // Registered as a screen occupant so tutorial callouts and the CLI panel
+    // place themselves around it like any other HUD control.
     void BuildFloatingBackButton(Transform canvasParent)
     {
         floatingBackButtonGo = MakeButton(canvasParent, "FloatingBackButton", GameTheme.ElectricBlue,
-            new Vector2(-20f, FloatingBackBottomMargin), "Back to Level Select", OnContinueClicked, out _,
-            size: new Vector2(220f, 48f), anchor: new Vector2(1f, 0f));
+            new Vector2(0f, FloatingBackBottom), "Back to Level Select", OnContinueClicked, out _,
+            size: new Vector2(220f, 48f), anchor: new Vector2(0.5f, 0f), idlePulse: true);
+        OccupiesScreen.Add(floatingBackButtonGo, OccupantLayer.Hud);
 
         floatingBackButtonGo.SetActive(false);
     }
@@ -281,7 +461,8 @@ public class LevelCompletePanel : MonoBehaviour
     // isn't tinted) — matches TutorialUIManager's fx.glowColor usage.
     GameObject MakeButton(Transform parent, string name, Color glowColor, Vector2 anchoredPos,
                            string text, UnityEngine.Events.UnityAction onClick,
-                           out TextMeshProUGUI label, Vector2? size = null, Vector2? anchor = null)
+                           out TextMeshProUGUI label, Vector2? size = null, Vector2? anchor = null,
+                           bool idlePulse = false)
     {
         Vector2 btnSize = size ?? new Vector2(250f, 52f);
         Vector2 a       = anchor ?? new Vector2(0.5f, 0f);
@@ -351,6 +532,7 @@ public class LevelCompletePanel : MonoBehaviour
         fx.normalSprite    = actionNormalSprite;
         fx.hoverSprite     = actionHoverSprite;
         fx.glowColor       = glowColor;
+        fx.idlePulse       = idlePulse;
         fx.Init();
 
         btn.onClick.AddListener(() => fx.PlayClickThen(() => onClick?.Invoke()));

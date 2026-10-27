@@ -169,13 +169,19 @@ public class SelectionIndicator : MonoBehaviour
     /// that shouldn't get a ring (see class doc — currently only cables, via
     /// ShowOnCable instead of this method).</summary>
     public void ShowOnMesh(Transform root, Vector3 topAnchor, Vector3? groundCenter, Vector2 footprintXZ)
+        => ShowOnMesh(new[] { root }, topAnchor, groundCenter, footprintXZ);
+
+    /// <summary>Same as the single-root overload, but shells every renderer under
+    /// each of several roots — e.g. TableRemoverManager outlining a table together
+    /// with the devices sitting on it, since removing one now removes both.</summary>
+    public void ShowOnMesh(Transform[] roots, Vector3 topAnchor, Vector3? groundCenter, Vector2 footprintXZ)
     {
         trackedCable = null;
         cableOutlineLine.gameObject.SetActive(false);
         draggingRoot = null;
         draggingRenderers = null;
 
-        BuildMeshShells(root);
+        BuildMeshShells(roots);
 
         arrowAnchor = topAnchor;
 
@@ -206,7 +212,7 @@ public class SelectionIndicator : MonoBehaviour
         trackedCable = null;
         cableOutlineLine.gameObject.SetActive(false);
 
-        BuildMeshShells(root);
+        BuildMeshShells(new[] { root });
         draggingRoot = root;
         draggingRenderers = root.GetComponentsInChildren<Renderer>();
 
@@ -241,32 +247,40 @@ public class SelectionIndicator : MonoBehaviour
         ringDiameter = Mathf.Max(b.size.x, b.size.z) + ringPadding;
     }
 
-    void BuildMeshShells(Transform root)
+    void BuildMeshShells(Transform[] roots)
     {
         ClearMeshShells();
 
-        var renderers = root.GetComponentsInChildren<MeshRenderer>();
+        Material shellMat = GetOutlineShellMaterial();
+        if (shellMat == null) return; // shader unavailable (e.g. stripped from a build) — skip rather than leave an unmaterialed (magenta) shell
+
         s_shellBlock ??= new MaterialPropertyBlock();
         Color tint = new Color(color.r * GlowMultiplier, color.g * GlowMultiplier, color.b * GlowMultiplier, 0.95f);
         s_shellBlock.Clear();
         s_shellBlock.SetColor("_Color", tint);
         s_shellBlock.SetFloat("_Thickness", thickness);
 
-        foreach (var r in renderers)
+        foreach (var root in roots)
         {
-            var mf = r.GetComponent<MeshFilter>();
-            if (mf == null || mf.sharedMesh == null) continue;
+            if (root == null) continue;
+            var renderers = root.GetComponentsInChildren<MeshRenderer>();
 
-            var go = new GameObject("OutlineShell");
-            go.transform.SetParent(r.transform, false); // local identity: exact overlap, follows this part live
-            var shellMf = go.AddComponent<MeshFilter>();
-            shellMf.sharedMesh = mf.sharedMesh;
-            var shellR = go.AddComponent<MeshRenderer>();
-            shellR.sharedMaterial = GetOutlineShellMaterial();
-            shellR.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-            shellR.SetPropertyBlock(s_shellBlock);
+            foreach (var r in renderers)
+            {
+                var mf = r.GetComponent<MeshFilter>();
+                if (mf == null || mf.sharedMesh == null) continue;
 
-            shells.Add(go);
+                var go = new GameObject("OutlineShell");
+                go.transform.SetParent(r.transform, false); // local identity: exact overlap, follows this part live
+                var shellMf = go.AddComponent<MeshFilter>();
+                shellMf.sharedMesh = mf.sharedMesh;
+                var shellR = go.AddComponent<MeshRenderer>();
+                shellR.sharedMaterial = shellMat;
+                shellR.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                shellR.SetPropertyBlock(s_shellBlock);
+
+                shells.Add(go);
+            }
         }
     }
 
@@ -403,6 +417,7 @@ public class SelectionIndicator : MonoBehaviour
     {
         if (s_outlineShellMat != null) return s_outlineShellMat;
         Shader shader = Shader.Find("Custom/OutlineShell");
+        if (shader == null) return null; // stripped from a build, or shader failed to compile — skip the outline rather than error
         s_outlineShellMat = new Material(shader);
         return s_outlineShellMat;
     }

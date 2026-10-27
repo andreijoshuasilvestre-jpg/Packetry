@@ -1,0 +1,92 @@
+key	id	text
+bd04d1aebe6d9478	L1-01	Welcome! Let's build your first network together, one step at a time. Tip: rest your mouse on any button to see what it does. Click Next to begin.
+b34c8ef015cecc97	L1-02	Let's get a closer look first. Zoom in on the play area: scroll your mouse wheel, or click the zoom-in button in the bottom-right corner.
+5fe3ba9e78f47a67	L1-03	You can also pan the camera around. Try it — hold WASD to move the view.
+212f7bc2b74c13b4	L1-04	You can also turn the view to see things from another side. Click a turn button in the bottom-right corner (or press Q / E).
+510fda8909e4ec46	L1-05	Every device needs somewhere to sit. Click Table, then click the glowing circle once to set the table's first corner.
+54c5b67d71afcda2	L1-06	First corner set! Now move your mouse to the new glowing circle — the table stretches to follow — and click once more to set the opposite corner.
+8ca69a8548bf8355	L1-06a	Tables can be resized. Click your table once to select it.
+ee3511a600047b9d	L1-06b	Handles appeared on its corners and edges. Press and hold the marked edge handle.
+db3c4bde66e75794	L1-06c	Keep holding, drag the edge out to the glowing circle, then let go to make the table bigger.
+59e8d0312a06e7ed	L1-07	Press and hold PC, drag it over the table, then let go to drop it there. It must land inside the table's glowing outline.
+4815f85cd343d0c4	L1-08	Now rotate it: left-click your PC to select it (it glows cyan), then click a rotate button at the bottom of the screen. (Holding R and scrolling works too.)
+c7bc0c0b6dc7b9ab	L1-09	Placed devices can be moved too. Click and hold your PC to pick it up.
+239a3147afd042d2	L1-10	Keep holding, drag it to the glowing spot, then let go to place it down.
+37ad3733f08ff7f7	L1-11	Drag another PC from the sidebar onto the table.
+0bf57dd07481c1b0	L1-12	That button holds more than PCs. Click the arrow beside it to see the other tools. (Right-clicking the button works too.)
+88b81a74c46764f9	L1-13	Now drag Switch out onto the table — it's what connects your PCs together.
+85cff7e3a15d736f	L1-14	Every device has one or more ports — the small connection points cables plug into. If a device has more than one, a popup will ask which one to use when you connect a cable.
+1acd7bd525acf022	L1-15	Click Cable to start wiring your network.
+318695ddd990e4ea	L1-16	Now click your first PC — that's where the cable starts.
+d221ed83558a7305	L1-17	A list of free ports pops up — click one (like eth0) to plug the cable in there.
+a28a313c383d42f5	L1-18	Now click the Switch to finish the connection.
+018f0d917ed997ac	L1-19	Pick a free port on the Switch the same way to complete the cable.
+de1cab10eca7e6ca	L1-20	Click Cable again, then repeat: click your second PC, pick a port, click the Switch, and pick a port there too.
+931b09aa6fc60428	L1-21	Your network is built! Networks change too — let's learn to undo some of it. Click Remove, then click one of your cables to delete it.
+510deb4996dd9863	L1-22	Remove has an arrow too. Click the arrow to see the other removal tools.
+977ec5db9bf1f4bc	L1-23	Click Remove Device, then click one of your devices to delete it.
+ac9c509249b4d664	L1-24	Click the arrow beside Remove again to find the last tool.
+91c56b6bdced3d98	L1-25	Click Remove Table, then click your table to delete it.
+cb6e8a4982ef15b6	L1-26	Great work — you've learned to build a network, and take it apart when you need to.
+758824f2eab1df23	L2-01	Right-click a PC to open its address popup, then give it an IP address and subnet mask (e.g. 192.168.1.10 / 255.255.255.0).
+be94582ea71bcc0a	L2-02	Right-click the other PC and give it an IP on a DIFFERENT subnet (different network portion, e.g. 192.168.2.11) — let's see what happens when two devices can't reach each other.
+73842e378f164e94	L2-03	Click Ping, then pick the two PCs — since they're on different subnets, the ping will fail. Watch what that failure looks like.
+52f2777013cf6f68	L2-04	Right-click the second PC again and change its address so it's on the SAME subnet as the first PC (e.g. 192.168.1.11).
+6e446775a59d3467	L2-05	Click Ping again — now that both PCs share a subnet, they should reach each other.
+306c6757ab0694b4	L3-01	Right-click the Router to open its command line.
+e85604ed32f74edc	L3-02	Type enable (or click it in the Commands list and press Run) to enter Privileged EXEC mode. Most commands are locked until you do — it's how a real router keeps casual users from breaking its config. (Tip: rest your mouse on any command to see what it does.)
+ce0cdc8c785158da	L3-03	Type configure terminal to enter Global Config — settings you make here apply to the whole router. A single port's own settings live one level deeper, inside Interface Config.
+1f514f14e9954b6d	L3-04	Type interface eth0 to configure the first port. (Tip: press Tab to auto-complete, or click the command in the Commands list.)
+4e913474c393a186	L3-05	Type end to jump back to Privileged EXEC. You've now walked the whole map: User EXEC → Privileged EXEC → Global Config → Interface Config.
+aef5b54a1dc1b237	L3-06	Checkpoint — no outlines this time. You're back in Privileged EXEC — get the Router into interface eth1's configuration mode on your own.
+5ec01e392773ccba	L4-01	Place a Router to bridge the two subnets you're about to create.
+3225c448ef6df9a1	L4-02	Your Router has to be wired into both subnets before it can bridge them. Click Cable to start the first connection.
+9b8e1d8e985f9664	L4-03	One subnet wired! Click Cable again for the second — this time from the Router to the other Switch.
+4bd9c7b257002efb	L4-04	Click the Router — that's where this cable starts.
+118f7d6f274397e5	L4-05	Its free ports pop up — click one (like eth0) to plug the cable into the Router.
+25ce1b539c1d3b72	L4-05	Its free ports pop up — click one (like eth0) to plug the cable into the Switch.
+cb490570298cc63a	L4-05	Its free ports pop up — click one (like eth1) to plug the cable into the Router.
+9166cbe1d8cc2929	L4-05	Its free ports pop up — click one (like eth1) to plug the cable into the Switch.
+5bde953ad1fb315b	L4-05	Its free ports pop up — click one (like eth2) to plug the cable into the Router.
+7eb1909c15b2ff00	L4-05	Its free ports pop up — click one (like eth2) to plug the cable into the Switch.
+2d84576bd851a540	L4-05	Its free ports pop up — click one (like eth3) to plug the cable into the Router.
+520e77be34b06f7f	L4-05	Its free ports pop up — click one (like eth3) to plug the cable into the Switch.
+6067cdb9d8b80b91	L4-05	Its free ports pop up — click one (like eth4) to plug the cable into the Router.
+4b923039dc251e6e	L4-05	Its free ports pop up — click one (like eth4) to plug the cable into the Switch.
+621b7f52839812e6	L4-05	Its free ports pop up — click one (like eth5) to plug the cable into the Router.
+3974eb72039afb85	L4-05	Its free ports pop up — click one (like eth5) to plug the cable into the Switch.
+00876420f5295e50	L4-06	That PC has no free port left. Click an empty spot to close its list, then click the glowing Switch instead.
+14d08fc0c2182d8b	L4-06	That PC has no free port left. Click an empty spot to close its list, then click the glowing Router instead.
+1fc7ecc83d36ffef	L4-06	That Switch has no free port left. Click an empty spot to close its list, then click the glowing Switch instead.
+f699a89f8bb011a8	L4-06	That Switch has no free port left. Click an empty spot to close its list, then click the glowing Router instead.
+96c88081629a4624	L4-06	That Router has no free port left. Click an empty spot to close its list, then click the glowing Switch instead.
+d0cb6a09d15dbc3f	L4-06	That Router has no free port left. Click an empty spot to close its list, then click the glowing Router instead.
+012752204f2fdf2d	L4-07	Now pick a free port on the Router the same way to complete the cable.
+dddb1331acd0749c	L4-07	Now pick a free port on the Switch the same way to complete the cable.
+dbaebf697de218b9	L4-07	Now pick a free port on the PC the same way to complete the cable.
+65de52bd0ee95b94	L4-08	Now click the Router to finish the connection.
+def2542f41176f70	L4-09	Now click the glowing Switch to finish the connection.
+be43587b415fbcd5	L4-10	Now click a Switch to finish the connection.
+a8028b58d5237a90	L4-11	Right-click the Router to open its CLI. Type interface eth0, then ip address 192.168.1.1 255.255.255.0 and no shutdown to set up your first subnet.
+ae8fe9bea38fd6e7	L4-11	Right-click the Router to open its CLI. Type interface eth1, then ip address 192.168.1.1 255.255.255.0 and no shutdown to set up your first subnet.
+ff070ea1f191ebca	L4-11	Right-click the Router to open its CLI. Type interface eth2, then ip address 192.168.1.1 255.255.255.0 and no shutdown to set up your first subnet.
+2328c612e5c1f262	L4-12	Now set up the second subnet: interface eth0, then ip address 192.168.2.1 255.255.255.0 and no shutdown — a different subnet than the first interface.
+a08d79c0cdffd70d	L4-12	Now set up the second subnet: interface eth1, then ip address 192.168.2.1 255.255.255.0 and no shutdown — a different subnet than the first interface.
+6f67f4c10f58a7f8	L4-12	Now set up the second subnet: interface eth2, then ip address 192.168.2.1 255.255.255.0 and no shutdown — a different subnet than the first interface.
+0d87418a32ece890	L4-13	Every PC only knows how to reach devices on its own subnet directly — same network address, same mask. Anything outside that subnet is unreachable on its own.
+202875e28c887140	L4-14	That's what a default gateway is for: a router interface sitting on the PC's own subnet, responsible for forwarding traffic bound for anywhere else.
+6853a0f5deffc843	L4-15	The Router interfaces you just configured are the gateways for their subnets. When you address each PC next, its mask decides what's "local" — everything else quietly routes through the Router instead.
+e6be8195ebb8308a	L4-16	Concretely: interface eth0 → ip address 192.168.1.1 255.255.255.0 made 192.168.1.1 the gateway for that subnet — address a PC there like 192.168.1.10 255.255.255.0. Same for eth1: 192.168.2.1 is the gateway for a PC addressed like 192.168.2.10 255.255.255.0.
+9f249daae362d4ef	L4-16	Concretely: interface eth0 → ip address 192.168.1.1 255.255.255.0 made 192.168.1.1 the gateway for that subnet — address a PC there like 192.168.1.10 255.255.255.0. Same for eth2: 192.168.2.1 is the gateway for a PC addressed like 192.168.2.10 255.255.255.0.
+4c6db8a4a5391000	L4-16	Concretely: interface eth1 → ip address 192.168.1.1 255.255.255.0 made 192.168.1.1 the gateway for that subnet — address a PC there like 192.168.1.10 255.255.255.0. Same for eth2: 192.168.2.1 is the gateway for a PC addressed like 192.168.2.10 255.255.255.0.
+efe8137906dfcc3c	L4-17	Concretely: the ip address command you ran on each interface is exactly what made it a gateway — that same address is what you'll enter as each PC's gateway next.
+1cd6e5b7a9477c63	L4-18	Right-click a PC to open its address popup, then give the two PCs IPs matching the Router's two subnets — one PC on 192.168.1.x (eth0), the other on 192.168.2.x (eth1).
+37dcbeb7b8e13d9e	L4-18	Right-click a PC to open its address popup, then give the two PCs IPs matching the Router's two subnets — one PC on 192.168.1.x (eth0), the other on 192.168.2.x (eth2).
+4a49dbc0bb65cb8b	L4-18	Right-click a PC to open its address popup, then give the two PCs IPs matching the Router's two subnets — one PC on 192.168.1.x (eth1), the other on 192.168.2.x (eth2).
+70412f1961a9cf6c	L4-19	Click Ping, then pick the two PCs to confirm they can reach each other through the Router.
+bfffe135424ec7a8	L4-20	Click Send Packet, choose a type, then click the two PCs. HTTP Request is instant; File Transfer carries a bigger, slower payload. Press Enter to commit, then click Run Network to send real data across the Router.
+4d5324a5ef25133a	L11-01	So far, every subnet you've made has used the same size mask for every department — one /24 each, no matter how many hosts it actually needed.
+986eda68f237e64b	L11-02	This time, all three departments have to share ONE block: 192.168.1.0/24. You'll carve it into three pieces instead of getting a fresh block each.
+09239ac6331de35f	L11-03	Each department needs a different amount of room — one needs space for 4 hosts, one for 14, one for 30. Giving all three an identical mask would either waste addresses or not fit — that's what VLSM (Variable Length Subnet Masking) solves: sizing each piece to fit what it's actually for.
+298765516f072b42	L11-04	Pick a mask for each department that's big enough for its own requirement, keep all three inside that one /24, and make sure none of their address ranges overlap.
+7e9b25aeb3db5d41	W-01	That second click landed on (or right next to) your first one, so the table would be too small to hold anything. Click a corner further away to size it — two separate clicks, not a double-click.
