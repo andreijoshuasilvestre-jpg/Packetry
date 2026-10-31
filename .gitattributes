@@ -1,0 +1,2 @@
+# Unity window-layout files (*.wlt) aren't Wolfram Language code; keep them out of GitHub's language stats
+*.wlt linguist-detectable=false
