@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash",
-      "mcp__unity-mcp",
-      "Write"
-    ]
-  }
-}

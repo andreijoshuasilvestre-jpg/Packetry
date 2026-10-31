@@ -46,3 +46,19 @@ __pycache__/
 # graphify cache (regenerable)
 /graphify-out/cache/
 /Assets/Scripts/graphify-out/cache/
+
+# Local dev tooling — kept on disk, not published
+/CLAUDE.md
+/.claude/
+/.graphifyignore
+/graphify-out/
+/Assets/graphify-out/
+/Assets/graphify-out.meta
+/Assets/Scripts/graphify-out/
+/Assets/Scripts/graphify-out.meta
+
+# Working files — kept on disk, not published
+/Docs/
+/Screenshots/
+/SFX_Originals/
+/Cursors/
