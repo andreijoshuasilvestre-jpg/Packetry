@@ -948,8 +948,14 @@ public class GameBootstrap : MonoBehaviour
         // step-by-step UI via TutorialUIManager (TutorialManager for level 1,
         // the guide classes for 2-4), so the generic checklist would just be
         // redundant with it.
+        // HintGuideManager comes with it: the checklist is the only way to
+        // open a hint, so it has nothing to show anywhere else.
         int level = LevelManager.Instance.CurrentLevel;
-        if (level != 1 && level != 2 && level != 3 && level != 4) EnsureComponent<TaskUIManager>("TaskUIManager");
+        if (level != 1 && level != 2 && level != 3 && level != 4)
+        {
+            EnsureComponent<TaskUIManager>("TaskUIManager");
+            EnsureComponent<HintGuideManager>("HintGuideManager");
+        }
         EnsureComponent<NotificationManager>("NotificationManager");
         EnsureComponent<ActivitySubtitle>("ActivitySubtitle");
         EnsureComponent<AnnotationWarningManager>("AnnotationWarningManager");

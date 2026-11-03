@@ -41,8 +41,26 @@ public class PacketCoverageTracker
     /// <summary>Registers the standard task against the level's own live PC
     /// list — evaluated every frame by TaskManager, so PCs placed (or
     /// removed) after registration are accounted for automatically.</summary>
-    public void RegisterTask(TaskManager tm, IReadOnlyList<NetworkDevice> pcs) =>
-        tm.RegisterTask(TaskDescription, () => AllCovered(pcs), HintNudge, HintSpecific, HintAnswer);
+    public void RegisterTask(TaskManager tm, IReadOnlyList<NetworkDevice> pcs)
+    {
+        // Two PCs still waiting on a delivery — a sender and a receiver for
+        // the next run — then the button that sends it.
+        var uncovered = new HintGuide { Devices = () => FirstTwoUncovered(pcs) };
+        tm.RegisterTask(TaskDescription, () => AllCovered(pcs), HintNudge, HintSpecific, HintAnswer,
+            specificGuide: uncovered, answerGuide: uncovered.WithButton(HintTargets.PacketButton));
+    }
+
+    (NetworkDevice a, NetworkDevice b) FirstTwoUncovered(IReadOnlyList<NetworkDevice> pcs)
+    {
+        NetworkDevice first = null;
+        foreach (var pc in pcs)
+        {
+            if (pc == null || covered.Contains(pc)) continue;
+            if (first == null) first = pc;
+            else return (first, pc);
+        }
+        return (first, null);
+    }
 
     // Removed PCs linger in each level's placedPCs list as destroyed
     // references (Unity-null) — skipped rather than counted as uncovered.

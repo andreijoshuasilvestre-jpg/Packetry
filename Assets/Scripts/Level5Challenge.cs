@@ -49,18 +49,24 @@ public class Level5Challenge : MonoBehaviour, IKeepsFinishedBuild
         var tm = TaskManager.Instance;
         if (tm != null)
         {
+            var nextDevice = new HintGuide { Button = () => HintTargets.NextDeviceTool(placedPCs.Count < 2, placedSwitch == null, false) };
             tm.RegisterTask("Place two PCs and a Switch", () => placedPCs.Count >= 2 && placedSwitch != null,
                 hintNudge: "Drag devices in from the sidebar on the left.",
                 hintSpecific: "You need exactly 2 PCs and 1 Switch on the table.",
-                hintAnswer: "Click the PC button twice, then the Switch button once.");
+                hintAnswer: "Click the PC button twice, then the Switch button once.",
+                specificGuide: nextDevice);
+            var uncabledPc = new HintGuide { Devices = () => (HintTargets.FirstUncabled(placedPCs), placedSwitch) };
             tm.RegisterTask("Cable both PCs to the Switch", BothPcsCabled,
                 hintNudge: "Use the Cable tool to connect two devices' ports together.",
                 hintSpecific: "Each PC needs its own cable running to the Switch — not to each other.",
-                hintAnswer: "Click Cable, click a PC, pick its port, click the Switch, pick a free port. Repeat for the second PC.");
+                hintAnswer: "Click Cable, click a PC, pick its port, click the Switch, pick a free port. Repeat for the second PC.",
+                specificGuide: uncabledPc,
+                answerGuide: uncabledPc.WithButton(() => HintTargets.DeviceTool(CompoundToolKind.Cable)));
             tm.RegisterTask("Give both PCs IP addresses on the same subnet", TwoPcsOnSameSubnet,
                 hintNudge: "Same subnet means matching network address — check both masks match too.",
                 hintSpecific: "Try 192.168.1.x for both PCs, with mask 255.255.255.0.",
-                hintAnswer: "e.g. 192.168.1.10 / 255.255.255.0 and 192.168.1.20 / 255.255.255.0.");
+                hintAnswer: "e.g. 192.168.1.10 / 255.255.255.0 and 192.168.1.20 / 255.255.255.0.",
+                specificGuide: new HintGuide { Devices = () => (HintTargets.FirstMisaddressed(placedPCs), null), Gesture = MouseGesture.RightClick });
             packetCoverage.RegisterTask(tm, placedPCs);
 
             // Subscribed only once every task is in — a resumed save's tasks

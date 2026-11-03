@@ -52,13 +52,33 @@ public class Level6Challenge : MonoBehaviour, IKeepsFinishedBuild
         if (tm != null)
         {
             tm.RegisterTask("Place four PCs, two Switches, and a Router",
-                () => placedPCs.Count >= 4 && placedSwitches.Count >= 2 && placedRouter != null);
+                () => placedPCs.Count >= 4 && placedSwitches.Count >= 2 && placedRouter != null,
+                hintNudge: "Picture two departments — two PCs and a Switch each — with one Router in the middle joining them.",
+                hintSpecific: "PC, Switch and Router share one sidebar button — click the arrow beside it (or right-click it) to pick the others.",
+                hintAnswer: "Drag out four PCs, then pick Switch from the arrow and drag out two, then pick Router and drag out one.",
+                specificGuide: new HintGuide { Button = () => HintTargets.NextDeviceTool(placedPCs.Count < 4, placedSwitches.Count < 2, placedRouter == null) });
+            var nextCable = new HintGuide { Devices = () => HintTargets.NextDepartmentCable(placedPCs, placedSwitches, placedRouter) };
             tm.RegisterTask("Cable two PCs to each Switch, and both Switches to the Router",
-                () => AllPcsCabled() && SwitchesLinkedToRouter());
-            tm.RegisterTask("Give each department's PCs matching IP addresses — one subnet per Switch",
-                TwoSubnetsOfTwo);
+                () => AllPcsCabled() && SwitchesLinkedToRouter(),
+                hintNudge: "Wire each department on its own first: its two PCs plug into their own Switch.",
+                hintSpecific: "Then each Switch needs one more cable, to the Router — the PCs never cable to the Router directly.",
+                hintAnswer: "Click Cable, click a PC, pick a port, click its Switch, pick a port. Repeat for all four PCs, then cable each Switch to a free Router port.",
+                specificGuide: nextCable,
+                answerGuide: nextCable.WithButton(() => HintTargets.DeviceTool(CompoundToolKind.Cable)));
+            // Router before PCs, the order Level 4 taught: each department's
+            // subnet is set on its Router port, then its PCs are addressed to match.
             tm.RegisterTask("Configure both router interfaces with IP addresses and enable them",
-                () => placedRouter != null && Enumerable.Range(0, placedRouter.PortCount).Count(i => placedRouter.IsPortActive(i)) >= 2);
+                () => placedRouter != null && Enumerable.Range(0, placedRouter.PortCount).Count(i => placedRouter.IsPortActive(i)) >= 2,
+                hintNudge: "Give each department its own subnet. The Router needs one address in each — on the port cabled to that department's Switch.",
+                hintSpecific: "Right-click the Router to open its CLI. Ports start shut down, so after addressing one you also have to turn it on with <b>no shutdown</b>.",
+                hintAnswer: "Type <b>enable</b>, <b>configure terminal</b>, <b>interface eth0</b>, <b>ip address 192.168.1.1 255.255.255.0</b>, <b>no shutdown</b> — then the same for eth1 with 192.168.2.1. Match each port to the subnet of the Switch it's cabled to.",
+                specificGuide: new HintGuide { Devices = () => (placedRouter, null), Gesture = MouseGesture.RightClick });
+            tm.RegisterTask("Give each department's PCs matching IP addresses — one subnet per Switch",
+                TwoSubnetsOfTwo,
+                hintNudge: "Each PC goes on the same subnet as the Router port its Switch is cabled to.",
+                hintSpecific: "Right-click each PC to address it. Use the same mask as its Router port, and change only the last number.",
+                hintAnswer: "e.g. 192.168.1.10 and 192.168.1.11 on the Switch cabled to 192.168.1.1, 192.168.2.10 and 192.168.2.11 on the other, all with mask 255.255.255.0.",
+                specificGuide: new HintGuide { Devices = () => (HintTargets.FirstMisaddressed(placedPCs, placedRouter), null), Gesture = MouseGesture.RightClick });
             packetCoverage.RegisterTask(tm, placedPCs);
 
             // Subscribed only once every task is in — a resumed save's tasks

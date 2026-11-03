@@ -83,19 +83,46 @@ public class Level11Challenge : MonoBehaviour, IKeepsFinishedBuild, INarratedLev
         {
             tm.RegisterTask("Place six PCs, three Switches, and a Router",
                 () => placedPCs.Count >= DepartmentCount * PcsPerDepartment &&
-                      placedSwitches.Count >= DepartmentCount && placedRouter != null);
+                      placedSwitches.Count >= DepartmentCount && placedRouter != null,
+                hintNudge: "Three departments — two PCs and a Switch each — all joined by one Router.",
+                hintSpecific: "PC, Switch and Router share one sidebar button — click the arrow beside it (or right-click it) to pick the others.",
+                hintAnswer: "Drag out six PCs, then pick Switch from the arrow and drag out three, then pick Router and drag out one.",
+                specificGuide: new HintGuide
+                {
+                    Button = () => HintTargets.NextDeviceTool(placedPCs.Count < DepartmentCount * PcsPerDepartment,
+                        placedSwitches.Count < DepartmentCount, placedRouter == null),
+                });
+            var nextCable = new HintGuide { Devices = () => HintTargets.NextDepartmentCable(placedPCs, placedSwitches, placedRouter) };
             tm.RegisterTask("Cable two PCs to each Switch, and all three Switches to the Router",
-                () => AllPcsCabled() && SwitchesLinkedToRouter());
+                () => AllPcsCabled() && SwitchesLinkedToRouter(),
+                hintNudge: "Wire each department on its own first: its two PCs plug into their own Switch.",
+                hintSpecific: "Then each Switch gets one cable to the Router — three Router ports used, one per department.",
+                hintAnswer: "Click Cable, click a PC, pick a port, click its Switch, pick a port. Repeat for all six PCs, then cable each Switch to a free Router port.",
+                specificGuide: nextCable,
+                answerGuide: nextCable.WithButton(() => HintTargets.DeviceTool(CompoundToolKind.Cable)));
+            // Router before PCs, the order Level 4 taught — so the subnet
+            // plan is made here, on the Router's ports, and the PCs follow it.
+            tm.RegisterTask("Configure all three router interfaces with IP addresses and enable them",
+                () => placedRouter != null && Enumerable.Range(0, placedRouter.PortCount).Count(i => placedRouter.IsPortActive(i)) >= DepartmentCount,
+                hintNudge: "Plan the subnets first: all three come out of the same 192.168.1.0/24 block — different sizes, not three separate /24s like earlier levels.",
+                hintSpecific: "Sort the needs smallest to largest (4, 14, 30) — /29, /28 and /27 just fit. Give each port its subnet's first usable address and mask, then <b>no shutdown</b>.",
+                hintAnswer: "e.g. eth0: <b>ip address 192.168.1.1 255.255.255.224</b>, eth1: 192.168.1.33 255.255.255.240, eth2: 192.168.1.49 255.255.255.248 — each followed by <b>no shutdown</b>, matched to the Switch it's cabled to.",
+                specificGuide: new HintGuide { Devices = () => (placedRouter, null), Gesture = MouseGesture.RightClick });
             tm.RegisterTask(
                 $"Address each department from the shared block {SupernetIp}/24 — sized for {RequiredHostCounts[0]}, {RequiredHostCounts[1]}, and {RequiredHostCounts[2]} hosts, with no two subnets overlapping",
                 ThreeVlsmSubnets,
-                hintNudge: "All three subnets have to come out of the same 192.168.1.0/24 block — different sizes, not three separate /24s like earlier levels.",
-                hintSpecific: "Sort the three needs smallest to largest (4, 14, 30) and pick a mask for each that just fits: /29, /28, /27.",
-                hintAnswer: "e.g. 192.168.1.0/27 (30 hosts), 192.168.1.32/28 (14 hosts), 192.168.1.48/29 (4 hosts).");
-            tm.RegisterTask("Configure all three router interfaces with IP addresses and enable them",
-                () => placedRouter != null && Enumerable.Range(0, placedRouter.PortCount).Count(i => placedRouter.IsPortActive(i)) >= DepartmentCount);
+                hintNudge: "Each PC goes on the subnet of the Router port its Switch is cabled to — and with different-sized subnets, that means its mask too.",
+                hintSpecific: "Give both PCs behind a port that port's mask, and pick host addresses inside its block.",
+                hintAnswer: "e.g. 192.168.1.2 and 192.168.1.3 with mask 255.255.255.224 behind the /27 port, 192.168.1.34 and 192.168.1.35 with 255.255.255.240 behind the /28, 192.168.1.50 and 192.168.1.51 with 255.255.255.248 behind the /29.",
+                specificGuide: new HintGuide { Devices = () => (HintTargets.FirstMisaddressed(placedPCs, placedRouter), null), Gesture = MouseGesture.RightClick });
+            var pingPair = new HintGuide { Devices = () => HintTargets.SameSubnetPair(placedPCs) };
             tm.RegisterTask("Successfully ping between two PCs within the same department",
-                () => sameSubnetPingSucceeded);
+                () => sameSubnetPingSucceeded,
+                hintNudge: "Test one department at a time: ping between the two PCs on the same Switch.",
+                hintSpecific: "Click Ping, then click a source PC and a destination PC that share a Switch and a subnet.",
+                hintAnswer: "Click Ping, click one PC, then click the other PC on the same Switch.",
+                specificGuide: pingPair,
+                answerGuide: pingPair.WithButton(HintTargets.PingButton));
             packetCoverage.RegisterTask(tm, placedPCs);
 
             // Subscribed only once every task is in — a resumed save's tasks

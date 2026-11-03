@@ -51,10 +51,37 @@ public class Level7Challenge : MonoBehaviour, IKeepsFinishedBuild
         var tm = TaskManager.Instance;
         if (tm != null)
         {
-            tm.RegisterTask("Reconnect the disconnected PC", AllPcsCabled);
-            tm.RegisterTask("Bring the Router's second interface back online", RouterHasTwoActiveInterfaces);
-            tm.RegisterTask("Fix the misaddressed PC", TwoSubnetsOfTwo);
-            tm.RegisterTask("Successfully ping between the two PCs in the affected department", () => sameSubnetPingSucceeded);
+            tm.RegisterTask("Reconnect the disconnected PC", AllPcsCabled,
+                hintNudge: "Look for a PC with nothing plugged into it — or ping between PCs and watch for a \"no cable path\" failure.",
+                hintSpecific: "It's in the 192.168.10.x department: one of its two PCs isn't cabled to the Switch.",
+                hintAnswer: "Click Cable, click the unplugged PC, pick its port, then click the Switch its neighbor is plugged into and pick a free port.",
+                specificGuide: new HintGuide { Devices = () => (HintTargets.FirstUncabled(placedPCs), null) },
+                answerGuide: new HintGuide
+                {
+                    Devices = () =>
+                    {
+                        var pc = HintTargets.FirstUncabled(placedPCs);
+                        return (pc, HintTargets.SubnetMateUplink(pc, placedPCs));
+                    },
+                    Button = () => HintTargets.DeviceTool(CompoundToolKind.Cable),
+                });
+            tm.RegisterTask("Bring the Router's second interface back online", RouterHasTwoActiveInterfaces,
+                hintNudge: "A Router port can have the right address and still be switched off. Ask the Router what state its ports are in.",
+                hintSpecific: "Right-click the Router, type <b>enable</b>, then <b>show ip interface brief</b> — one port reads administratively down.",
+                hintAnswer: "In the CLI: <b>enable</b>, <b>configure terminal</b>, <b>interface eth1</b>, <b>no shutdown</b>.",
+                specificGuide: new HintGuide { Devices = () => (placedRouter, null), Gesture = MouseGesture.RightClick });
+            tm.RegisterTask("Fix the misaddressed PC", TwoSubnetsOfTwo,
+                hintNudge: "PCs on the same Switch must share a subnet. Compare each PC's address with its neighbor's.",
+                hintSpecific: "One PC in the 192.168.20.x department has an address on a different subnet entirely.",
+                hintAnswer: "Right-click the PC at 192.168.99.11 and change it to 192.168.20.11, mask 255.255.255.0.",
+                specificGuide: new HintGuide { Devices = () => (HintTargets.FirstMisaddressed(placedPCs, placedRouter), null), Gesture = MouseGesture.RightClick });
+            var pingPair = new HintGuide { Devices = () => HintTargets.SameSubnetPair(placedPCs) };
+            tm.RegisterTask("Successfully ping between the two PCs in the affected department", () => sameSubnetPingSucceeded,
+                hintNudge: "Once the address is fixed, prove it: ping from one PC in that department to the other.",
+                hintSpecific: "Click Ping, then click the source PC and the destination PC — both should be on 192.168.20.x.",
+                hintAnswer: "Click Ping, click the PC you just fixed, then click its neighbor on the same Switch.",
+                specificGuide: pingPair,
+                answerGuide: pingPair.WithButton(HintTargets.PingButton));
             packetCoverage.RegisterTask(tm, placedPCs);
 
             // Subscribed only once every task is in — a resumed save's tasks

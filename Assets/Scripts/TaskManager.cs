@@ -32,15 +32,37 @@ public class TaskManager : MonoBehaviour
         public string HintNudge;
         public string HintSpecific;
         public string HintAnswer;
+        // What the two star-costing tiers point at on screen (see HintGuide,
+        // HintGuideManager) — the answer falls back to the specific tier's
+        // guide when it has none of its own. The free nudge is text only.
+        public HintGuide SpecificGuide;
+        public HintGuide AnswerGuide;
         // 0 = no hint used yet. Drives both TaskUIManager's per-row hint text
         // and ComputeStars()'s level-completion star rating.
         public int HighestHintTierUsed;
+
+        /// <summary>The guide for the deepest hint revealed so far — null while
+        /// only the nudge (or nothing) has been opened, or when there's no guide.</summary>
+        public HintGuide CurrentGuide => HighestHintTierUsed switch
+        {
+            >= AnswerTier   => AnswerGuide ?? SpecificGuide,
+            SpecificTier    => SpecificGuide,
+            _               => null,
+        };
     }
+
+    // Hint tiers, in reveal order. The nudge is free; the two past it each
+    // cost a star (see ComputeStars) and bring their HintGuide on screen.
+    public const int NudgeTier = 1, SpecificTier = 2, AnswerTier = 3;
 
     private readonly List<GameTask> tasks = new List<GameTask>();
     public IReadOnlyList<GameTask> Tasks => tasks;
 
     public event Action OnTasksChanged;
+
+    /// <summary>A task revealed a deeper hint tier (see UseHint) — what
+    /// HintGuideManager follows to know which task's guide to show.</summary>
+    public event Action<GameTask> OnHintUsed;
 
     /// <summary>
     /// Guided levels (Level2Guide..Level4Guide) register their tasks in stage
@@ -90,11 +112,12 @@ public class TaskManager : MonoBehaviour
     /// Level3Guide) — its tasks register fresh even when a save exists.</summary>
     public void DiscardRestoredProgress() => restoredComplete.Clear();
 
-    // hintNudge/hintSpecific/hintAnswer are optional trailing params on this
-    // same method rather than a separate overload — fully source-compatible
-    // with every existing call site that only passes the first two args.
+    // The hint text and guides are optional trailing params on this same
+    // method rather than a separate overload — fully source-compatible with
+    // every existing call site that only passes the first two args.
     public void RegisterTask(string description, Func<bool> checkCondition,
-                              string hintNudge = null, string hintSpecific = null, string hintAnswer = null)
+                              string hintNudge = null, string hintSpecific = null, string hintAnswer = null,
+                              HintGuide specificGuide = null, HintGuide answerGuide = null)
     {
         // In order, a restored completion only counts while every earlier
         // task is complete too — keeps the "completed tasks are always a
@@ -107,6 +130,7 @@ public class TaskManager : MonoBehaviour
         {
             Description = description, CheckCondition = checkCondition,
             HintNudge = hintNudge, HintSpecific = hintSpecific, HintAnswer = hintAnswer,
+            SpecificGuide = specificGuide, AnswerGuide = answerGuide,
             IsComplete = restored,
         });
         OnTasksChanged?.Invoke();
@@ -118,18 +142,18 @@ public class TaskManager : MonoBehaviour
     {
         if (task == null || tier <= task.HighestHintTierUsed) return;
         task.HighestHintTierUsed = tier;
+        OnHintUsed?.Invoke(task);
         OnTasksChanged?.Invoke();
     }
 
-    /// <summary>3 stars if no task in the current level ever needed a hint, 2 if the
-    /// deepest hint used anywhere was just a nudge (tier 1), 1 if any task needed a
-    /// specific/answer-tier hint (tier 2 or 3).</summary>
+    /// <summary>3 stars unless some task needed more than a nudge (nudges are
+    /// free): 2 if the deepest hint used anywhere was a specific one, 1 if any
+    /// task needed its answer.</summary>
     public int ComputeStars()
     {
-        if (tasks.Count == 0) return 3;
         int deepest = 0;
         foreach (var t in tasks) deepest = Mathf.Max(deepest, t.HighestHintTierUsed);
-        return 3 - Mathf.Clamp(deepest, 0, 2);
+        return deepest >= AnswerTier ? 1 : deepest >= SpecificTier ? 2 : 3;
     }
 
     void Update()

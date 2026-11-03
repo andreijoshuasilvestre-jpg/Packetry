@@ -164,10 +164,14 @@ public static class ReachabilityService
     /// PC, not fail the check; what this actually verifies is that the
     /// switch/router backbone itself has no single point of failure. Used by
     /// Level10Challenge.</summary>
-    public static bool SurvivesAnyCableCut(IReadOnlyList<NetworkDevice> pcs, IReadOnlyList<Cable> cables)
-    {
-        if (cables.Count == 0) return false;
+    public static bool SurvivesAnyCableCut(IReadOnlyList<NetworkDevice> pcs, IReadOnlyList<Cable> cables) =>
+        cables.Count > 0 && FindCriticalCable(pcs, cables) == null;
 
+    /// <summary>The first cable whose loss alone cuts PCs (other than its own
+    /// ends) off from each other — the single point of failure
+    /// SurvivesAnyCableCut looks for — or null when there's none.</summary>
+    public static Cable FindCriticalCable(IReadOnlyList<NetworkDevice> pcs, IReadOnlyList<Cable> cables)
+    {
         foreach (Cable cut in cables)
         {
             var remaining = new List<NetworkDevice>();
@@ -176,9 +180,9 @@ public static class ReachabilityService
 
             for (int i = 0; i < remaining.Count; i++)
                 for (int j = i + 1; j < remaining.Count; j++)
-                    if (!Ping(remaining[i], remaining[j], cut).Success) return false;
+                    if (!Ping(remaining[i], remaining[j], cut).Success) return cut;
         }
-        return true;
+        return null;
     }
 
     // Pure physical-adjacency BFS (ignores subnets/active state entirely) —

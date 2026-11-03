@@ -55,19 +55,25 @@ public class Level8Challenge : MonoBehaviour, IKeepsFinishedBuild
                 () => placedPCs.Count >= MinPcs,
                 hintNudge: "Drag PCs in from the sidebar — the shape of the network is entirely up to you.",
                 hintSpecific: $"You need at least {MinPcs} PCs on the table before the rest of the checklist can pass.",
-                hintAnswer: "Click the PC button in the sidebar three times.");
+                hintAnswer: "Click the PC button in the sidebar three times.",
+                specificGuide: new HintGuide { Button = () => HintTargets.NextDeviceTool(placedPCs.Count < MinPcs, false, false) });
+            var uncabledPc = new HintGuide { Devices = () => (HintTargets.FirstUncabled(placedPCs), null) };
             tm.RegisterTask("Cable every PC into the network", AllPcsCabled,
                 hintNudge: "Use the Cable tool — every PC needs at least one connection into whatever you've built.",
                 hintSpecific: "Check each PC for a dangling, unconnected port.",
-                hintAnswer: "Click Cable, click a PC, pick its port, then click whatever it should connect to.");
+                hintAnswer: "Click Cable, click a PC, pick its port, then click whatever it should connect to.",
+                specificGuide: uncabledPc,
+                answerGuide: uncabledPc.WithButton(() => HintTargets.DeviceTool(CompoundToolKind.Cable)));
             tm.RegisterTask("Give every PC an IP address", AllPcsAddressed,
                 hintNudge: "Right-click a PC to open its address panel.",
                 hintSpecific: "Every PC needs both an IP and a subnet mask set — not just some of them.",
-                hintAnswer: "e.g. 192.168.1.10 / 255.255.255.0 — reuse the same subnet for PCs that should talk directly.");
+                hintAnswer: "e.g. 192.168.1.10 / 255.255.255.0 — reuse the same subnet for PCs that should talk directly.",
+                specificGuide: new HintGuide { Devices = () => (HintTargets.FirstUnaddressed(placedPCs), null), Gesture = MouseGesture.RightClick });
             tm.RegisterTask("Get every PC talking to every other PC", () => ReachabilityService.AllPairsReachable(placedPCs),
                 hintNudge: "Every PC should be able to ping every other PC — not just its nearest neighbor.",
                 hintSpecific: "If two PCs are on different subnets with no Router bridging them, they can never reach each other.",
-                hintAnswer: "Simplest fix: put every PC on the same subnet through Switches. Or bridge subnets with a Router the same way Level 6 did.");
+                hintAnswer: "Simplest fix: put every PC on the same subnet through Switches. Or bridge subnets with a Router the same way Level 6 did.",
+                specificGuide: new HintGuide { Devices = () => HintTargets.FirstUnreachablePair(placedPCs) });
             packetCoverage.RegisterTask(tm, placedPCs);
 
             // Subscribed only once every task is in — a resumed save's tasks
