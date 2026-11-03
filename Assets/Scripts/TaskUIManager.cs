@@ -152,6 +152,22 @@ public class TaskUIManager : MonoBehaviour
 
     static float ArrowAngle(bool open) => open ? 90f : -90f; // the art points right; +90 turns it up
 
+    // Star meter on the header's left edge — the rating this run is heading
+    // for, in the same filled/empty stars LevelCompletePanel ends on. A star
+    // lost to a hint (TaskManager.OnStarsChanged) pops and then drains out of
+    // its slot (see DrainStar) rather than just flipping, so the loss is seen
+    // as it happens; the link that costs it says so first (see HintCostTag).
+    const int   MaxStars          = 3;
+    const float StarSize          = StarIconBuilder.GridSize * 2; // 2x2-pixel cells, small enough for the header
+    const float StarSpacing       = 2f;
+    const float StarDrainDuration = 0.55f;
+    const float StarDrainPunch    = 1.4f;  // swells this much before shrinking away
+    const float StarDrainPunchShare = 0.25f;
+    const float StarDrainStagger  = 0.15f; // an answer that costs two stars drains them one after the other
+    static string CostTagHex => ColorUtility.ToHtmlStringRGB(StarIconBuilder.EarnedColor);
+    private Image[] starFills;
+    private int shownStars = MaxStars;
+
     void Start()
     {
         _font = Resources.Load<TMP_FontAsset>(FontResourcePath);
@@ -165,7 +181,10 @@ public class TaskUIManager : MonoBehaviour
         BuildCanvas();
 
         if (TaskManager.Instance != null)
+        {
             TaskManager.Instance.OnTasksChanged += RebuildRows;
+            TaskManager.Instance.OnStarsChanged += HandleStarsChanged;
+        }
 
         RebuildRows();
     }
@@ -180,7 +199,10 @@ public class TaskUIManager : MonoBehaviour
     void OnDestroy()
     {
         if (TaskManager.Instance != null)
+        {
             TaskManager.Instance.OnTasksChanged -= RebuildRows;
+            TaskManager.Instance.OnStarsChanged -= HandleStarsChanged;
+        }
     }
 
     void Update()
@@ -386,13 +408,18 @@ public class TaskUIManager : MonoBehaviour
         arrowRt.sizeDelta = new Vector2(ArrowSize, ArrowSize);
         SetArrowAngle(ArrowAngle(expanded));
 
+        BuildStarMeter(headerGo.transform);
+
         var headerHover = headerGo.AddComponent<UnityEngine.EventSystems.EventTrigger>();
         AddHeaderHover(headerHover, UnityEngine.EventSystems.EventTriggerType.PointerEnter, true);
         AddHeaderHover(headerHover, UnityEngine.EventSystems.EventTriggerType.PointerExit, false);
         HoverTooltip.Attach(headerGo, () => new TooltipContent
         {
             Title = "Tasks",
-            Body  = "What this level asks you to do. Each box ticks itself once that part of your network works.",
+            Subtitle = $"On track for {shownStars} of {MaxStars} stars",
+            Body  = "What this level asks you to do. Each box ticks itself once that part of your network works.\n\n" +
+                    "The stars are the rating you're heading for. A task's first hint is free; a more specific hint " +
+                    "drops the rating to 2 stars, and the answer to 1.",
             Footer = expanded ? "Click to fold the list away." : "Click to open the list again.",
         }, TooltipSide.Left);
 
@@ -457,6 +484,95 @@ public class TaskUIManager : MonoBehaviour
         float available = canvasHeight + panelRect.anchoredPosition.y // anchoredPosition.y is the (negative) top offset
                         - ScreenBottomMargin - PaddingY * 2f - HeaderHeight - RowSpacing;
         return Mathf.Max(CheckboxSize * 3f, available);
+    }
+
+    // ── Star meter ───────────────────────────────────────────────────────────
+
+    void BuildStarMeter(Transform header)
+    {
+        var meterGo = new GameObject("StarMeter", typeof(RectTransform));
+        meterGo.transform.SetParent(header, false);
+        var meterRt = (RectTransform)meterGo.transform;
+        meterRt.anchorMin = meterRt.anchorMax = new Vector2(0f, 0.5f);
+        meterRt.pivot = new Vector2(0f, 0.5f);
+        meterRt.anchoredPosition = Vector2.zero;
+        meterRt.sizeDelta = new Vector2(MaxStars * StarSize + (MaxStars - 1) * StarSpacing, StarSize);
+
+        var emptySprite = StarIconBuilder.GetSprite(StarIconBuilder.UnearnedColor, pixelScale: 2);
+        var fillSprite  = StarIconBuilder.GetSprite(StarIconBuilder.EarnedColor, pixelScale: 2);
+        starFills = new Image[MaxStars];
+        for (int i = 0; i < MaxStars; i++)
+        {
+            var slot = StarImage($"Star{i}", meterGo.transform, emptySprite);
+            var slotRt = slot.rectTransform;
+            slotRt.anchorMin = slotRt.anchorMax = new Vector2(0f, 0.5f);
+            slotRt.pivot = new Vector2(0f, 0.5f);
+            slotRt.anchoredPosition = new Vector2(i * (StarSize + StarSpacing), 0f);
+            slotRt.sizeDelta = new Vector2(StarSize, StarSize);
+
+            // The earned star sits on its empty slot, so draining it reveals the slot.
+            starFills[i] = StarImage("Fill", slot.transform, fillSprite);
+            var fillRt = starFills[i].rectTransform;
+            fillRt.anchorMin = Vector2.zero;
+            fillRt.anchorMax = Vector2.one;
+            fillRt.offsetMin = Vector2.zero;
+            fillRt.offsetMax = Vector2.zero;
+        }
+
+        shownStars = TaskManager.Instance != null ? TaskManager.Instance.ComputeStars() : MaxStars;
+        for (int i = 0; i < MaxStars; i++) starFills[i].enabled = i < shownStars;
+    }
+
+    static Image StarImage(string name, Transform parent, Sprite sprite)
+    {
+        var go = new GameObject(name, typeof(RectTransform));
+        go.transform.SetParent(parent, false);
+        var img = go.AddComponent<Image>();
+        img.sprite = sprite;
+        img.raycastTarget = false; // the header under it keeps every click and its own hover card
+        return img;
+    }
+
+    void HandleStarsChanged(int stars)
+    {
+        // Right to left, one after another when an answer costs two at once.
+        for (int i = shownStars - 1, n = 0; i >= stars; i--, n++)
+            StartCoroutine(DrainStar(starFills[i], n * StarDrainStagger));
+        shownStars = stars;
+
+        NotificationManager.Instance?.Notify(
+            $"Hint used — this level's best rating is now {stars} star{(stars == 1 ? "" : "s")}.", NotifyKind.Warning);
+    }
+
+    // Reverse of LevelCompletePanel's star pop: a quick swell (the hit), then
+    // the star shrinks and fades into its empty slot.
+    IEnumerator DrainStar(Image fill, float delay)
+    {
+        if (delay > 0f) yield return new WaitForSecondsRealtime(delay);
+
+        var rt = fill.rectTransform;
+        float t = 0f;
+        while (t < StarDrainDuration)
+        {
+            t += Time.unscaledDeltaTime;
+            float p = Mathf.Clamp01(t / StarDrainDuration);
+            float scale, alpha = 1f;
+            if (p < StarDrainPunchShare)
+                scale = Mathf.Lerp(1f, StarDrainPunch, Mathf.SmoothStep(0f, 1f, p / StarDrainPunchShare));
+            else
+            {
+                float q = Mathf.SmoothStep(0f, 1f, (p - StarDrainPunchShare) / (1f - StarDrainPunchShare));
+                scale = Mathf.Lerp(StarDrainPunch, 0f, q);
+                alpha = 1f - q;
+            }
+            rt.localScale = Vector3.one * scale;
+            fill.color = new Color(1f, 1f, 1f, alpha);
+            yield return null;
+        }
+
+        fill.enabled = false;
+        rt.localScale = Vector3.one;
+        fill.color = Color.white;
     }
 
     IEnumerator RevealFlashWithHud()
@@ -725,7 +841,7 @@ public class TaskUIManager : MonoBehaviour
             hintBtn.transition = Selectable.Transition.None;
             var hintBtnLabel = hintBtnGo.AddComponent<TextMeshProUGUI>();
             hintBtnLabel.font      = _font;
-            hintBtnLabel.text      = task.HighestHintTierUsed == 0 ? "Hint >" : "More hint >"; // PixeloidMono has no ▸ glyph
+            hintBtnLabel.text      = (task.HighestHintTierUsed == 0 ? "Hint >" : "More hint >") + HintCostTag(nextTier); // PixeloidMono has no ▸ glyph
             hintBtnLabel.fontSize  = LabelFontSize - 3;
             hintBtnLabel.color     = GameTheme.Info;
             hintBtnLabel.alignment = TextAlignmentOptions.TopLeft;
@@ -770,6 +886,20 @@ public class TaskUIManager : MonoBehaviour
             rt.offsetMax = Vector2.zero;
         }
         return img;
+    }
+
+    // What opening `tier` does to the rating, written on the link itself so
+    // a star is never spent by surprise. Only the deepest tier opened on any
+    // task counts (see TaskManager.ComputeStars), so a tier another task
+    // already paid for is labeled as costing nothing more. Words, not a "★"
+    // glyph — PixeloidMono has none (see StarIconBuilder).
+    static string HintCostTag(int tier)
+    {
+        var tm = TaskManager.Instance;
+        if (tm == null) return "";
+        int lost = tm.ComputeStars() - tm.StarsAfterHint(tier);
+        if (lost > 0) return $" <color=#{CostTagHex}>(-{lost} star{(lost == 1 ? "" : "s")})</color>";
+        return tier < TaskManager.SpecificTier ? " <alpha=#99>(free)" : " <alpha=#99>(no extra cost)";
     }
 
     static string HintTextForTier(TaskManager.GameTask task, int tier) => tier switch

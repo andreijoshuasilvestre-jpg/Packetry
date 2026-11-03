@@ -64,6 +64,10 @@ public class TaskManager : MonoBehaviour
     /// HintGuideManager follows to know which task's guide to show.</summary>
     public event Action<GameTask> OnHintUsed;
 
+    /// <summary>A hint just lowered the level's rating — the new star count.
+    /// TaskUIManager's star meter and toast.</summary>
+    public event Action<int> OnStarsChanged;
+
     /// <summary>
     /// Guided levels (Level2Guide..Level4Guide) register their tasks in stage
     /// order and walk them one at a time — with this on, only the first
@@ -141,20 +145,32 @@ public class TaskManager : MonoBehaviour
     public void UseHint(GameTask task, int tier)
     {
         if (task == null || tier <= task.HighestHintTierUsed) return;
+        int starsBefore = ComputeStars();
         task.HighestHintTierUsed = tier;
         OnHintUsed?.Invoke(task);
+        int stars = ComputeStars();
+        if (stars != starsBefore) OnStarsChanged?.Invoke(stars);
         OnTasksChanged?.Invoke();
     }
 
     /// <summary>3 stars unless some task needed more than a nudge (nudges are
     /// free): 2 if the deepest hint used anywhere was a specific one, 1 if any
     /// task needed its answer.</summary>
-    public int ComputeStars()
+    public int ComputeStars() => StarsFor(DeepestHintTier());
+
+    /// <summary>The rating opening hint `tier` on any task would leave. Only the
+    /// deepest tier anywhere counts, so a tier another task already reached
+    /// costs nothing more.</summary>
+    public int StarsAfterHint(int tier) => StarsFor(Mathf.Max(DeepestHintTier(), tier));
+
+    int DeepestHintTier()
     {
         int deepest = 0;
         foreach (var t in tasks) deepest = Mathf.Max(deepest, t.HighestHintTierUsed);
-        return deepest >= AnswerTier ? 1 : deepest >= SpecificTier ? 2 : 3;
+        return deepest;
     }
+
+    static int StarsFor(int deepestTier) => deepestTier >= AnswerTier ? 1 : deepestTier >= SpecificTier ? 2 : 3;
 
     void Update()
     {
